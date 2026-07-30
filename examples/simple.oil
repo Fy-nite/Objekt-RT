@@ -1,0 +1,7 @@
+module Test version 1.0.0
+class P {
+    static method M() -> void {
+        ldc.i4 -1
+        ret
+    }
+}

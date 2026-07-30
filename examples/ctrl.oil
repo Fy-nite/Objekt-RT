@@ -1,0 +1,59 @@
+module Demo version 1.0.0
+
+class Program {
+    static method Main() -> void {
+        // ── Test 1: if / else ─────────────────────────────────────────
+        // Push 1 (truthy) → if (stack) picks the `then` branch
+        ldc.i4 1
+        if (stack) {
+            ldc.i4 10
+        }
+        else {
+            ldc.i4 20
+        }
+        pop     // discard the 10
+
+        // Push 0 (falsy) → if (stack) picks the `else` branch
+        ldc.i4 0
+        if (stack) {
+            ldc.i4 100
+        }
+        else {
+            ldc.i4 200
+        }
+        pop     // discard the 200
+
+        // ── Test 2: while loop without if/else nesting ────────────────
+        // Count down from 3 to 0 using the stack only
+        ldc.i4 3
+        while (stack) {
+            ldc.i4 1
+            sub
+        }
+        // stack has 0 now
+
+        // ── Test 3: nested while + if ─────────────────────────────────
+        // For each iteration of outer, run one inner step
+        ldc.i4 2          // outer counter
+        while (stack) {
+            ldc.i4 1
+            sub           // decrement outer
+            dup           // duplicate outer counter
+            if (stack) {  // if outer > 0, push a marker
+                ldc.i4 99
+                pop
+            }
+            else {
+                ldc.i4 -1
+                pop
+            }
+            dup           // duplicate outer counter for the while condition
+        }
+
+        // Final stack: 0 (from the while loop)
+        // Pop it and push a clear result
+        pop
+        ldc.i4 42
+        ret
+    }
+}

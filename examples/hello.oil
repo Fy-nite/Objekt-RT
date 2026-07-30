@@ -1,0 +1,10 @@
+module Hello version 1.0.0
+
+class Program {
+    static method Main() -> void {
+        ldc.i4 42
+        ldc.i4 58
+        add
+        ret
+    }
+}

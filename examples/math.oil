@@ -1,0 +1,28 @@
+module Math version 1.0.0
+
+.metadata {
+    spec objectrt = "1.0"
+    
+    require [
+        Memory.Managed,
+    ]
+}
+
+class Calculator {
+    static field last_result: int32
+    
+    static method Add(a: int32, b: int32) -> int32 {
+        ldarg a
+        ldarg b
+        add
+        ret
+    }
+    
+    static method Main() -> void {
+        ldc.i4 10
+        ldc.i4 20
+        call Calculator.Add(int32, int32) -> int32
+        stsfld Calculator.last_result
+        ret
+    }
+}
