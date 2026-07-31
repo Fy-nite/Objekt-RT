@@ -102,19 +102,22 @@ Token Tokenizer::read_next() {
     size_t tok_line = line_;
     size_t tok_col = col_;
 
-    // Detect .metadata
-    if (c == '.' && is_ident_start(static_cast<char>(input_.peek()))) {
-        // Read the dot + identifier
-        std::string text;
-        text += static_cast<char>(input_.get()); col_++;
-        while (input_.good() && is_ident_cont(static_cast<char>(input_.peek()))) {
-            text += static_cast<char>(input_.get()); col_++;
+    // Detect .metadata  — consume the dot first, then check the next char
+    if (c == '.') {
+        input_.get(); col_++;
+        if (input_.good() && is_ident_start(static_cast<char>(input_.peek()))) {
+            std::string text = ".";
+            while (input_.good() && is_ident_cont(static_cast<char>(input_.peek()))) {
+                text += static_cast<char>(input_.get()); col_++;
+            }
+            if (text == ".metadata") {
+                return {TokenKind::DotMetadata, text, tok_line, tok_col};
+            }
+            // Otherwise treat as identifier
+            return {TokenKind::Identifier, text, tok_line, tok_col};
         }
-        if (text == ".metadata") {
-            return {TokenKind::DotMetadata, text, tok_line, tok_col};
-        }
-        // Otherwise treat as identifier
-        return {TokenKind::Identifier, text, tok_line, tok_col};
+        // Not followed by an identifier — it's a plain Dot
+        return {TokenKind::Dot, ".", tok_line, tok_col};
     }
 
     // Identifier or keyword
@@ -291,11 +294,21 @@ void ObjectILParser::parse_module_decl(ORBTModule& mod) {
 
         Token a = tokenizer_.advance();
         if (a.kind == TokenKind::Float) {
-            // "major.minor" — patch defaults to 0
+            // "major.minor" — may be followed by .patch if the float
+            // consumed only the first two components (e.g. "1.0.0" is
+            // tokenized as Float("1.0") + Dot + Integer("0")).
             size_t dot = a.text.find('.');
             uint16_t major = static_cast<uint16_t>(std::stoul(a.text.substr(0, dot)));
             uint16_t minor = static_cast<uint16_t>(std::stoul(a.text.substr(dot + 1)));
-            return {major, minor, 0};
+            uint16_t patch = 0;
+            if (tokenizer_.peek().kind == TokenKind::Dot) {
+                tokenizer_.advance(); // consume '.'
+                Token c = tokenizer_.advance();
+                if (c.kind != TokenKind::Integer)
+                    throw std::runtime_error("Expected patch version number after '.'");
+                patch = read_uint16(c);
+            }
+            return {major, minor, patch};
         }
         if (a.kind != TokenKind::Integer)
             throw std::runtime_error("Expected version number");

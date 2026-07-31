@@ -25,9 +25,9 @@ message('Using .NET RID: ' + rid)
 
 # ── Existing dependencies & include dirs ────────────────────────────────────
 dependencies = [
-    dependency('glib-2.0'),
-    dependency('gobject-2.0'),
-    dependency('luajit', required: true),
+    dependency('luajit'),
+    dependency('gtest'),
+    dependency('ftxui'),
 ]
 
 inc_dir = include_directories([
@@ -73,17 +73,25 @@ executable('ObjectRT', rt_sources,
 
 # ── Reader & VM ────────────────────────────────────────────────────────────
 reader_sources = files([
+    'src/reader/main.cpp',
     'src/reader/ORBTReader.cpp',
     'src/reader/ObjectILParser.cpp',
     'src/vm/ModuleCompiler.cpp',
     'src/vm/Interpreter.cpp',
+])
+compiler_sources = files([
+    'src/reader/ORBTReader.cpp',
+    'src/reader/ObjectILParser.cpp',
+    'src/vm/ModuleCompiler.cpp',
+    'src/vm/Interpreter.cpp',
+    'src/compiler/Program.cpp'
 ])
 
 executable('objectrt-reader', reader_sources,
     dependencies: dependencies,
     include_directories: inc_dir)
 
-executable('ORBC', reader_sources,
+executable('ORBC', compiler_sources,
     dependencies: dependencies,
     include_directories: inc_dir)
 

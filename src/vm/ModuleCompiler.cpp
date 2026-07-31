@@ -205,7 +205,7 @@ void ModuleCompiler::emit_f64(CompileState& s, double v) {
 // Compile one method
 // ============================================================================
 
-CompiledFunction ModuleCompiler::compile_method(
+Result<CompiledFunction> ModuleCompiler::compile_method(
     const objectrt::ORBTModule& src,
     const objectrt::TypeRecord& type,
     const objectrt::MethodRecord& method,
@@ -424,8 +424,8 @@ CompiledFunction ModuleCompiler::compile_method(
                 std::string field_ref = src.resolve(val.string_index);
                 auto it = field_map_.find(field_ref);
                 if (it == field_map_.end()) {
-                    std::cerr << "Warning: unresolved field '" << field_ref
-                              << "' in " << func.debug_name << "\n";
+                    if (state.error.empty())
+                        state.error = "unresolved field '" + field_ref + "' in " + func.debug_name;
                     emit_u16(state, 0);
                 } else {
                     emit_u16(state, static_cast<uint16_t>(it->second));
@@ -440,8 +440,8 @@ CompiledFunction ModuleCompiler::compile_method(
                 std::string method_ref = src.resolve(val.string_index);
                 auto it = func_map_.find(method_ref);
                 if (it == func_map_.end()) {
-                    std::cerr << "Warning: unresolved method '" << method_ref
-                              << "' in " << func.debug_name << "\n";
+                    if (state.error.empty())
+                        state.error = "unresolved method '" + method_ref + "' in " + func.debug_name;
                     emit_u32(state, 0);
                 } else {
                     emit_u32(state, it->second);
@@ -456,8 +456,8 @@ CompiledFunction ModuleCompiler::compile_method(
                 std::string type_ref = src.resolve(val.string_index);
                 auto it = type_map_.find(type_ref);
                 if (it == type_map_.end()) {
-                    std::cerr << "Warning: unresolved type '" << type_ref
-                              << "' in " << func.debug_name << "\n";
+                    if (state.error.empty())
+                        state.error = "unresolved type '" + type_ref + "' in " + func.debug_name;
                     emit_u16(state, 0);
                 } else {
                     emit_u16(state, static_cast<uint16_t>(it->second));
@@ -473,8 +473,8 @@ CompiledFunction ModuleCompiler::compile_method(
                 std::string type_ref = src.resolve(val.string_index);
                 auto it = type_map_.find(type_ref);
                 if (it == type_map_.end()) {
-                    std::cerr << "Warning: unresolved type '" << type_ref
-                              << "' in " << func.debug_name << "\n";
+                    if (state.error.empty())
+                        state.error = "unresolved type '" + type_ref + "' in " + func.debug_name;
                     emit_u16(state, 0);
                 } else {
                     emit_u16(state, static_cast<uint16_t>(it->second));
@@ -545,6 +545,9 @@ CompiledFunction ModuleCompiler::compile_method(
         }
     }
 
+    if (!state.error.empty())
+        return VmError(VmErrorKind::UnresolvedField, state.error, func.debug_name);
+
     func.code = std::move(state.code);
     func.max_stack = state.max_stack_depth + 8; // pad for safety
     return func;
@@ -554,7 +557,7 @@ CompiledFunction ModuleCompiler::compile_method(
 // Main compilation entry point
 // ============================================================================
 
-CompiledModule ModuleCompiler::compile(const objectrt::ORBTModule& src) {
+Result<CompiledModule> ModuleCompiler::compile(const objectrt::ORBTModule& src) {
     CompiledModule mod;
 
     // 1. Build name→index resolution tables
@@ -622,7 +625,13 @@ CompiledModule ModuleCompiler::compile(const objectrt::ORBTModule& src) {
             for (uint32_t mi = 0; mi < src_type.methods.size(); mi++) {
                 std::string fname = method_full_name(src, src_type, src_type.methods[mi]);
                 if (fname == rf.full_name) {
-                    CompiledFunction cf = compile_method(src, src_type, src_type.methods[mi], rf.full_name);
+                    auto cf_result = compile_method(src, src_type, src_type.methods[mi], rf.full_name);
+                    if (!cf_result)
+                        return VmError(VmErrorKind::UnresolvedField,
+                                       "compilation of '" + rf.full_name + "' failed: " +
+                                       cf_result.error().message,
+                                       rf.full_name);
+                    CompiledFunction cf = std::move(cf_result).value();
                     cf.self_index = rf.new_index;
                     mod.functions.push_back(std::move(cf));
                     mod.function_map[rf.full_name] = rf.new_index;
@@ -669,7 +678,7 @@ CompiledModule ModuleCompiler::compile(const objectrt::ORBTModule& src) {
 // Convenience wrapper
 // ============================================================================
 
-CompiledModule compile_module(const objectrt::ORBTModule& src) {
+Result<CompiledModule> compile_module(const objectrt::ORBTModule& src) {
     ModuleCompiler compiler;
     return compiler.compile(src);
 }

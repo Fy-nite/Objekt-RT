@@ -1,0 +1,698 @@
+using System.Globalization;
+using ObjectRT.Abstractions;
+
+namespace ObjectRT.Reader;
+
+/// <summary>Parses ObjectIL text format into an ORBTModule.</summary>
+public class ObjectILParser
+{
+    private readonly ObjectILTokenizer _tokenizer;
+
+    public ObjectILParser(string input)
+    {
+        _tokenizer = new ObjectILTokenizer(input);
+    }
+
+    public ORBTModule ParseModule()
+    {
+        var mod = new ORBTModule();
+        ParseInto(mod);
+        return mod;
+    }
+
+    public void ParseInto(ORBTModule mod)
+    {
+        ParseModuleDecl(mod);
+
+        if (_tokenizer.PeekToken().Kind == TokenKind.DotMetadata)
+            ParseMetadataBlock(mod);
+
+        while (_tokenizer.PeekToken().Kind != TokenKind.Eof)
+            ParseTypeDecl(mod);
+    }
+
+    // ── Parsing helpers ─────────────────────────────────────────────
+
+    private Token Expect(TokenKind kind)
+    {
+        var t = _tokenizer.AdvanceToken();
+        if (t.Kind != kind)
+            throw new FormatException($"Expected {kind} but got '{t.Text}' at {t.Line}:{t.Col}");
+        return t;
+    }
+
+    private Token ExpectIdentifier()
+    {
+        var t = _tokenizer.AdvanceToken();
+        if (t.Kind != TokenKind.Identifier && t.Kind != TokenKind.Keyword)
+            throw new FormatException($"Expected identifier but got '{t.Text}' at {t.Line}:{t.Col}");
+        return t;
+    }
+
+    private bool Match(TokenKind kind)
+    {
+        if (_tokenizer.PeekToken().Kind == kind)
+        {
+            _tokenizer.AdvanceToken();
+            return true;
+        }
+        return false;
+    }
+
+    private Token? TryMatch(TokenKind kind)
+    {
+        if (_tokenizer.PeekToken().Kind == kind)
+            return _tokenizer.AdvanceToken();
+        return null;
+    }
+
+    // ── Grammar rules ───────────────────────────────────────────────
+
+    private void ParseModuleDecl(ORBTModule mod)
+    {
+        Expect(TokenKind.Keyword); // "module"
+        var name = ExpectIdentifier();
+        mod.ModuleName = name.Text;
+
+        Expect(TokenKind.Keyword); // "version"
+
+        var a = _tokenizer.AdvanceToken();
+        ushort major, minor, patch = 0;
+
+        if (a.Kind == TokenKind.Float)
+        {
+            var parts = a.Text.Split('.');
+            major = ushort.Parse(parts[0]);
+            minor = parts.Length > 1 ? ushort.Parse(parts[1]) : (ushort)0;
+            if (_tokenizer.PeekToken().Kind == TokenKind.Dot)
+            {
+                _tokenizer.AdvanceToken();
+                var c = _tokenizer.AdvanceToken();
+                if (c.Kind == TokenKind.Integer)
+                    patch = ushort.Parse(c.Text);
+                else throw new FormatException("Expected patch version number after '.'");
+            }
+        }
+        else if (a.Kind == TokenKind.Integer)
+        {
+            major = ushort.Parse(a.Text);
+            Expect(TokenKind.Dot);
+            var b = _tokenizer.AdvanceToken();
+            if (b.Kind == TokenKind.Float)
+            {
+                var parts = b.Text.Split('.');
+                minor = ushort.Parse(parts[0]);
+                patch = parts.Length > 1 ? ushort.Parse(parts[1]) : (ushort)0;
+            }
+            else if (b.Kind == TokenKind.Integer)
+            {
+                minor = ushort.Parse(b.Text);
+                Expect(TokenKind.Dot);
+                patch = ushort.Parse(Expect(TokenKind.Integer).Text);
+            }
+            else throw new FormatException("Expected version number");
+        }
+        else throw new FormatException("Expected version number");
+
+        mod.Version = new ModuleVersion(major, minor, patch);
+        mod.FormatVersion = 0x01;
+    }
+
+    private void ParseMetadataBlock(ORBTModule mod)
+    {
+        Expect(TokenKind.DotMetadata);
+        Expect(TokenKind.OpenBrace);
+
+        while (_tokenizer.PeekToken().Kind != TokenKind.CloseBrace && _tokenizer.PeekToken().Kind != TokenKind.Eof)
+        {
+            var key = ExpectIdentifier();
+            var keyStr = key.Text;
+
+            if (keyStr == "spec")
+            {
+                ExpectIdentifier(); // "objectrt"
+                TryMatch(TokenKind.Equals);
+                var ver = Expect(TokenKind.String);
+                mod.Metadata.SpecVersion = ver.Text;
+                mod.Metadata.Entries.Add(new MetadataEntry("spec", ver.Text));
+            }
+            else if (keyStr is "require" or "optional")
+            {
+                Expect(TokenKind.OpenBracket);
+                var features = new List<string>();
+                while (_tokenizer.PeekToken().Kind != TokenKind.CloseBracket && _tokenizer.PeekToken().Kind != TokenKind.Eof)
+                {
+                    features.Add(ExpectIdentifier().Text);
+                    TryMatch(TokenKind.Comma);
+                }
+                Expect(TokenKind.CloseBracket);
+
+                if (keyStr == "require") mod.Metadata.Require = features;
+                else mod.Metadata.Optional = features;
+                mod.Metadata.Entries.Add(new MetadataEntry(keyStr, features));
+            }
+        }
+
+        Expect(TokenKind.CloseBrace);
+    }
+
+    private void ParseTypeDecl(ORBTModule mod)
+    {
+        var type = new TypeRecord
+        {
+            Flags = TypeFlags.None,
+            Access = MemberAccess.Public,
+            BaseTypeIndex = -1,
+            NamespaceIndex = 0,
+        };
+
+        while (_tokenizer.PeekToken().Kind == TokenKind.Keyword)
+        {
+            var kw = _tokenizer.PeekToken().Text;
+            if (kw == "abstract") { _tokenizer.AdvanceToken(); type.Flags |= TypeFlags.Abstract; }
+            else if (kw == "sealed") { _tokenizer.AdvanceToken(); type.Flags |= TypeFlags.Sealed; }
+            else break;
+        }
+
+        var kindTok = Expect(TokenKind.Keyword);
+        type.Kind = kindTok.Text switch
+        {
+            "class" => TypeKind.Class,
+            "interface" => TypeKind.Interface,
+            "struct" => TypeKind.Struct,
+            "enum" => TypeKind.Enum,
+            _ => throw new FormatException($"Expected type kind at {kindTok.Line}"),
+        };
+
+        var nameTok = ExpectIdentifier();
+        type.NameIndex = mod.StringPool.Add(nameTok.Text);
+
+        if (_tokenizer.PeekToken().Text == "implements")
+        {
+            _tokenizer.AdvanceToken();
+            while (true)
+            {
+                type.InterfaceIndices.Add(mod.StringPool.Add(ExpectIdentifier().Text));
+                type.InterfaceCount++;
+                if (TryMatch(TokenKind.Comma) == null) break;
+            }
+        }
+
+        Expect(TokenKind.OpenBrace);
+
+        while (_tokenizer.PeekToken().Kind != TokenKind.CloseBrace && _tokenizer.PeekToken().Kind != TokenKind.Eof)
+            ParseMember(mod, type);
+
+        Expect(TokenKind.CloseBrace);
+        mod.Types.Add(type);
+    }
+
+    private void ParseMember(ORBTModule mod, TypeRecord type)
+    {
+        var access = MemberAccess.Public;
+        var mflags = MethodFlags.None;
+
+        while (_tokenizer.PeekToken().Kind == TokenKind.Keyword)
+        {
+            switch (_tokenizer.PeekToken().Text)
+            {
+                case "public":    access = MemberAccess.Public; _tokenizer.AdvanceToken(); break;
+                case "private":   access = MemberAccess.Private; _tokenizer.AdvanceToken(); break;
+                case "protected": access = MemberAccess.Protected; _tokenizer.AdvanceToken(); break;
+                case "internal":  access = MemberAccess.Internal; _tokenizer.AdvanceToken(); break;
+                case "static":    mflags |= MethodFlags.Static; _tokenizer.AdvanceToken(); break;
+                case "virtual":   mflags |= MethodFlags.Virtual; _tokenizer.AdvanceToken(); break;
+                case "override":  mflags |= MethodFlags.Override; _tokenizer.AdvanceToken(); break;
+                case "abstract":  mflags |= MethodFlags.Abstract; _tokenizer.AdvanceToken(); break;
+                default: goto done;
+            }
+        }
+        done:
+
+        var next = _tokenizer.PeekToken();
+        if (next.Text == "field")
+        {
+            type.Access = access;
+            ParseField(mod, type);
+        }
+        else if (next.Text == "method")
+        {
+            type.Access = access;
+            ParseMethod(mod, type);
+            if (type.Methods.Count > 0)
+            {
+                type.Methods[^1].Flags |= mflags;
+                type.Methods[^1].Access = access;
+            }
+        }
+        else if (next.Text == "constructor")
+        {
+            _tokenizer.AdvanceToken();
+            type.Access = access;
+
+            var method = new MethodRecord
+            {
+                Access = access,
+                Flags = MethodFlags.None,
+                NameIndex = mod.StringPool.Add(".ctor"),
+            };
+
+            Expect(TokenKind.OpenParen);
+            while (_tokenizer.PeekToken().Kind != TokenKind.CloseParen)
+            {
+                var pname = ExpectIdentifier();
+                Expect(TokenKind.Colon);
+                var ptype = ExpectIdentifier();
+                method.Params.Add(new ParameterRecord(
+                    mod.StringPool.Add(pname.Text),
+                    mod.StringPool.Add(ptype.Text)));
+                TryMatch(TokenKind.Comma);
+            }
+            Expect(TokenKind.CloseParen);
+
+            method.SignatureIndex = method.NameIndex;
+            method.ParamCount = (ushort)method.Params.Count;
+            ParseMethodBody(mod, method);
+            type.Methods.Add(method);
+            type.MethodCount++;
+        }
+        else throw new FormatException($"Expected member declaration at {next.Line}, got '{next.Text}'");
+    }
+
+    private void ParseField(ORBTModule mod, TypeRecord type)
+    {
+        _tokenizer.AdvanceToken();
+        var name = ExpectIdentifier();
+        Expect(TokenKind.Colon);
+        var typeName = ExpectIdentifier();
+        type.Fields.Add(new FieldRecord(mod.StringPool.Add(name.Text), mod.StringPool.Add(typeName.Text)));
+        type.FieldCount++;
+    }
+
+    private void ParseMethod(ORBTModule mod, TypeRecord type)
+    {
+        _tokenizer.AdvanceToken();
+
+        var method = new MethodRecord { Access = MemberAccess.Public, Flags = MethodFlags.None };
+        method.NameIndex = mod.StringPool.Add(ExpectIdentifier().Text);
+
+        Expect(TokenKind.OpenParen);
+        while (_tokenizer.PeekToken().Kind != TokenKind.CloseParen)
+        {
+            var pname = ExpectIdentifier();
+            Expect(TokenKind.Colon);
+            var ptype = ExpectIdentifier();
+            method.Params.Add(new ParameterRecord(
+                mod.StringPool.Add(pname.Text),
+                mod.StringPool.Add(ptype.Text)));
+            TryMatch(TokenKind.Comma);
+        }
+        Expect(TokenKind.CloseParen);
+        method.ParamCount = (ushort)method.Params.Count;
+
+        Expect(TokenKind.Arrow);
+        method.SignatureIndex = mod.StringPool.Add(ExpectIdentifier().Text);
+
+        ParseMethodBody(mod, method);
+        type.Methods.Add(method);
+        type.MethodCount++;
+    }
+
+    // ── Method body ─────────────────────────────────────────────────
+
+    private struct PendingBranch(int bytePos, int labelId)
+    {
+        public int BytePos = bytePos;
+        public int LabelId = labelId;
+    }
+
+    private struct LabelSlot
+    {
+        public int LabelId;
+        public bool Defined;
+        public int BytePos;
+    }
+
+    private readonly List<PendingBranch> _fixups = new();
+    private readonly Dictionary<int, LabelSlot> _labels = new();
+    private int _nextLabelId;
+    private readonly Stack<int> _breakTargets = new();
+    private readonly Stack<int> _continueTargets = new();
+
+    private void ParseMethodBody(ORBTModule mod, MethodRecord method)
+    {
+        Expect(TokenKind.OpenBrace);
+
+        _fixups.Clear();
+        _labels.Clear();
+        _nextLabelId = 0;
+        _breakTargets.Clear();
+        _continueTargets.Clear();
+
+        var code = new List<byte>();
+
+        // Local variables
+        while (_tokenizer.PeekToken().Text == "local")
+        {
+            _tokenizer.AdvanceToken();
+            var lname = ExpectIdentifier();
+            Expect(TokenKind.Colon);
+            var ltype = ExpectIdentifier();
+            method.Locals.Add(new LocalRecord(mod.StringPool.Add(lname.Text), mod.StringPool.Add(ltype.Text)));
+            method.LocalCount++;
+        }
+
+        while (_tokenizer.PeekToken().Kind != TokenKind.CloseBrace && _tokenizer.PeekToken().Kind != TokenKind.Eof)
+            ParseStatement(mod, method, code);
+
+        ResolveFixups(code);
+        method.RawInstructionData = code.ToArray();
+
+        Expect(TokenKind.CloseBrace);
+    }
+
+    private void ParseStatement(ORBTModule mod, MethodRecord method, List<byte> code)
+    {
+        if (_tokenizer.PeekToken().Kind is TokenKind.Eof or TokenKind.CloseBrace) return;
+
+        var next = _tokenizer.PeekToken();
+
+        if (next.Text == "if") { _tokenizer.AdvanceToken(); ParseIf(mod, method, code); return; }
+        if (next.Text == "while") { _tokenizer.AdvanceToken(); ParseWhile(mod, method, code); return; }
+
+        if (next.Text == "break")
+        {
+            _tokenizer.AdvanceToken();
+            if (_breakTargets.Count == 0) throw new FormatException($"break outside loop at {next.Line}:{next.Col}");
+            int endLabel = _breakTargets.Peek();
+            code.Add(0x32); // br
+            _fixups.Add(new PendingBranch(code.Count, endLabel));
+            EmitI32(code, 0);
+            method.InstrCount++;
+            return;
+        }
+
+        if (next.Text == "continue")
+        {
+            _tokenizer.AdvanceToken();
+            if (_continueTargets.Count == 0) throw new FormatException($"continue outside loop at {next.Line}:{next.Col}");
+            int loopLabel = _continueTargets.Peek();
+            code.Add(0x32); // br
+            if (_labels.TryGetValue(loopLabel, out var slot) && slot.Defined)
+            {
+                int brEnd = code.Count + 4;
+                EmitI32(code, slot.BytePos - brEnd);
+            }
+            else
+            {
+                _fixups.Add(new PendingBranch(code.Count, loopLabel));
+                EmitI32(code, 0);
+            }
+            method.InstrCount++;
+            return;
+        }
+
+        ParseSimpleInstruction(mod, method, code);
+    }
+
+    private void ParseIf(ORBTModule mod, MethodRecord method, List<byte> code)
+    {
+        Expect(TokenKind.OpenParen);
+        var cond = ExpectIdentifier();
+        if (cond.Text != "stack") throw new FormatException($"Expected 'stack' condition in if at {cond.Line}");
+        Expect(TokenKind.CloseParen);
+
+        int elseLabel = FreshLabel();
+        int endLabel = FreshLabel();
+
+        code.Add(0x34); // brfalse
+        _fixups.Add(new PendingBranch(code.Count, elseLabel));
+        EmitI32(code, 0);
+        method.InstrCount++;
+
+        Expect(TokenKind.OpenBrace);
+        while (_tokenizer.PeekToken().Kind != TokenKind.CloseBrace && _tokenizer.PeekToken().Kind != TokenKind.Eof)
+            ParseStatement(mod, method, code);
+        Expect(TokenKind.CloseBrace);
+
+        if (_tokenizer.PeekToken().Text == "else")
+        {
+            _tokenizer.AdvanceToken();
+            code.Add(0x32); // br
+            _fixups.Add(new PendingBranch(code.Count, endLabel));
+            EmitI32(code, 0);
+            method.InstrCount++;
+            PlaceLabel(elseLabel, code);
+            Expect(TokenKind.OpenBrace);
+            while (_tokenizer.PeekToken().Kind != TokenKind.CloseBrace && _tokenizer.PeekToken().Kind != TokenKind.Eof)
+                ParseStatement(mod, method, code);
+            Expect(TokenKind.CloseBrace);
+        }
+        else PlaceLabel(elseLabel, code);
+
+        PlaceLabel(endLabel, code);
+    }
+
+    private void ParseWhile(ORBTModule mod, MethodRecord method, List<byte> code)
+    {
+        Expect(TokenKind.OpenParen);
+        var cond = ExpectIdentifier();
+        if (cond.Text != "stack") throw new FormatException($"Expected 'stack' condition in while at {cond.Line}");
+        Expect(TokenKind.CloseParen);
+
+        int loopLabel = FreshLabel();
+        int endLabel = FreshLabel();
+
+        _breakTargets.Push(endLabel);
+        _continueTargets.Push(loopLabel);
+        PlaceLabel(loopLabel, code);
+
+        // dup the stack value so brfalse doesn't consume the counter
+        code.Add(0x22); // dup
+        method.InstrCount++;
+
+        code.Add(0x34); // brfalse
+        _fixups.Add(new PendingBranch(code.Count, endLabel));
+        EmitI32(code, 0);
+        method.InstrCount++;
+
+        Expect(TokenKind.OpenBrace);
+        while (_tokenizer.PeekToken().Kind != TokenKind.CloseBrace && _tokenizer.PeekToken().Kind != TokenKind.Eof)
+            ParseStatement(mod, method, code);
+        Expect(TokenKind.CloseBrace);
+
+        code.Add(0x32); // br
+        int brEnd = code.Count + 4;
+        EmitI32(code, _labels[loopLabel].BytePos - brEnd);
+        method.InstrCount++;
+
+        _breakTargets.Pop();
+        _continueTargets.Pop();
+        PlaceLabel(endLabel, code);
+    }
+
+    private void ParseSimpleInstruction(ORBTModule mod, MethodRecord method, List<byte> code)
+    {
+        var mnemonic = ExpectIdentifier();
+        int mnLine = mnemonic.Line;
+
+        int opcode = OpcodeExtensions.FromMnemonic(mnemonic.Text);
+        if (opcode < 0)
+        {
+            while (_tokenizer.PeekToken().Kind != TokenKind.Eof
+                   && _tokenizer.PeekToken().Kind != TokenKind.CloseBrace
+                   && _tokenizer.PeekToken().Line == mnLine)
+                _tokenizer.AdvanceToken();
+            return;
+        }
+
+        code.Add((byte)opcode);
+
+        // call / callvirt / callnative — operand is a method name, optionally
+        // followed by a parenthesized parameter type list. We encode the
+        // method name as a string-pool index plus the parameter count (U16 +
+        // U16) so the interpreter can resolve the target at runtime: module
+        // function first, then the host native dispatch.
+        if (opcode is 0x16 or 0x17 or 0x35)
+        {
+            ushort nameIdx = 0;
+            ushort paramCount = 0;
+
+            if (_tokenizer.PeekToken().Kind != TokenKind.Eof
+                && _tokenizer.PeekToken().Kind != TokenKind.CloseBrace
+                && _tokenizer.PeekToken().Kind != TokenKind.OpenBrace
+                && _tokenizer.PeekToken().Line == mnLine)
+            {
+                nameIdx = mod.StringPool.Add(_tokenizer.AdvanceToken().Text);
+
+                if (_tokenizer.PeekToken().Kind == TokenKind.OpenParen)
+                {
+                    _tokenizer.AdvanceToken();
+                    while (_tokenizer.PeekToken().Kind != TokenKind.CloseParen
+                           && _tokenizer.PeekToken().Kind != TokenKind.Eof)
+                    {
+                        var t = _tokenizer.PeekToken();
+                        if (t.Kind is TokenKind.Identifier or TokenKind.Keyword)
+                            paramCount++;
+                        _tokenizer.AdvanceToken();
+                    }
+                    if (_tokenizer.PeekToken().Kind == TokenKind.CloseParen)
+                        _tokenizer.AdvanceToken();
+                }
+            }
+
+            EmitU16(code, nameIdx);
+            EmitU16(code, paramCount);
+
+            // Skip the rest of the line (e.g. "-> retType").
+            while (_tokenizer.PeekToken().Kind != TokenKind.Eof
+                   && _tokenizer.PeekToken().Kind != TokenKind.CloseBrace
+                   && _tokenizer.PeekToken().Line == mnLine)
+                _tokenizer.AdvanceToken();
+
+            method.InstrCount++;
+            return;
+        }
+
+        bool operandRead = false;
+
+        if (_tokenizer.PeekToken().Kind != TokenKind.Eof
+            && _tokenizer.PeekToken().Kind != TokenKind.CloseBrace
+            && _tokenizer.PeekToken().Kind != TokenKind.OpenBrace
+            && _tokenizer.PeekToken().Line == mnLine)
+        {
+            var operand = _tokenizer.AdvanceToken();
+            operandRead = EncodeOperand(mod, code, opcode, operand);
+            if (!operandRead)
+            {
+                while (_tokenizer.PeekToken().Kind != TokenKind.Eof && _tokenizer.PeekToken().Line == mnLine)
+                    _tokenizer.AdvanceToken();
+            }
+        }
+
+        method.InstrCount++;
+    }
+
+    // ── Operand encoding ────────────────────────────────────────────
+
+    private static bool EncodeOperand(ORBTModule mod, List<byte> code, int opcode, Token operand)
+    {
+        switch (opcode)
+        {
+            case 0x01: // ldc (alias)
+            case 0x2B: // ldc.i4
+                EmitI32(code, int.Parse(operand.Text));
+                return true;
+
+            case 0x2C: // ldc.i8
+            {
+                long val = long.Parse(operand.Text);
+                for (int i = 0; i < 8; i++)
+                    code.Add((byte)((val >> (i * 8)) & 0xFF));
+                return true;
+            }
+            case 0x2D: // ldc.r4
+            {
+                float val = float.Parse(operand.Text, CultureInfo.InvariantCulture);
+                var bits = BitConverter.SingleToInt32Bits(val);
+                EmitI32(code, bits);
+                return true;
+            }
+            case 0x2E: // ldc.r8
+            {
+                double val = double.Parse(operand.Text, CultureInfo.InvariantCulture);
+                var bits = BitConverter.DoubleToInt64Bits(val);
+                for (int i = 0; i < 8; i++)
+                    code.Add((byte)((bits >> (i * 8)) & 0xFF));
+                return true;
+            }
+            // uint16 index operands
+            case 0x03: case 0x04: // ldarg, starg
+            case 0x05: case 0x06: // ldloc, stloc
+            case 0x02:            // ldstr
+            case 0x12: case 0x13: // newobj, newarr
+            case 0x1F: case 0x20: case 0x21: // conv, castclass, isinst
+            case 0x0F: case 0x2A: // ldfld, stfld
+            case 0x10: case 0x11: // ldsfld, stsfld
+            {
+                ushort idx;
+                if (operand.Kind == TokenKind.Integer)
+                    idx = ushort.Parse(operand.Text);
+                else
+                    idx = mod.StringPool.Add(operand.Text);
+                EmitU16(code, idx);
+                return true;
+            }
+            case 0x32: case 0x33: case 0x34: // br, brtrue, brfalse
+            {
+                int off = int.Parse(operand.Text);
+                EmitI32(code, off);
+                return true;
+            }
+            default:
+                return false;
+        }
+    }
+
+    // ── Bytecode emission helpers ───────────────────────────────────
+
+    private int FreshLabel() => _nextLabelId++;
+
+    private void PlaceLabel(int id, List<byte> code)
+    {
+        _labels[id] = new LabelSlot { LabelId = id, Defined = true, BytePos = code.Count };
+    }
+
+    private void ResolveFixups(List<byte> code)
+    {
+        foreach (var fx in _fixups)
+        {
+            if (!_labels.TryGetValue(fx.LabelId, out var slot) || !slot.Defined)
+                throw new FormatException($"Unresolved label {fx.LabelId}");
+            int brEnd = fx.BytePos + 4;
+            int offset = slot.BytePos - brEnd;
+            EmitI32At(code, fx.BytePos, offset);
+        }
+        _fixups.Clear();
+    }
+
+    private static void EmitI32At(List<byte> code, int pos, int val)
+    {
+        code[pos + 0] = (byte)(val & 0xFF);
+        code[pos + 1] = (byte)((val >> 8) & 0xFF);
+        code[pos + 2] = (byte)((val >> 16) & 0xFF);
+        code[pos + 3] = (byte)((val >> 24) & 0xFF);
+    }
+
+    private static void EmitI32(List<byte> code, int val)
+    {
+        code.Add((byte)(val & 0xFF));
+        code.Add((byte)((val >> 8) & 0xFF));
+        code.Add((byte)((val >> 16) & 0xFF));
+        code.Add((byte)((val >> 24) & 0xFF));
+    }
+
+    private static void EmitU16(List<byte> code, ushort val)
+    {
+        code.Add((byte)(val & 0xFF));
+        code.Add((byte)((val >> 8) & 0xFF));
+    }
+}
+
+// ── Convenience ─────────────────────────────────────────────────────────
+
+public static class OilFileReader
+{
+    public static ORBTModule ParseFile(string path)
+    {
+        var content = File.ReadAllText(path);
+        var parser = new ObjectILParser(content);
+        return parser.ParseModule();
+    }
+
+    public static ORBTModule ParseString(string content)
+    {
+        var parser = new ObjectILParser(content);
+        return parser.ParseModule();
+    }
+}

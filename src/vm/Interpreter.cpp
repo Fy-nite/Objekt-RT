@@ -21,18 +21,26 @@ Interpreter::Interpreter(const CompiledModule& mod)
 // Run helpers — push initial frame, then enter iterative dispatch
 // ============================================================================
 
-Value Interpreter::run() {
+Result<Value> Interpreter::run() {
     if (!mod_.has_entry()) {
-        std::cerr << "Interpreter: no entry point\n";
-        return Value::nil();
+        return VmError(VmErrorKind::UnresolvedEntryPoint,
+                       "module has no entry point");
     }
     stack_.clear();
     frames_.clear();
     return run_function(mod_.entry_function);
 }
 
-Value Interpreter::run_function(uint32_t func_idx) {
-    const auto& func = mod_.get_function(func_idx);
+Result<Value> Interpreter::run_function(uint32_t func_idx) {
+    // Resolve function with Result-based lookup
+    auto func_res = mod_.try_get_function(func_idx);
+    if (!func_res)
+        return VmError(VmErrorKind::InvalidFunctionIndex,
+                       "function index " + std::to_string(func_idx) +
+                       " out of bounds (" + std::to_string(mod_.functions.size()) + ")");
+    const auto& func = func_res.value().get();
+
+    current_func_name_ = func.debug_name;
 
     Frame frame;
     frame.func       = &func;
@@ -50,7 +58,11 @@ Value Interpreter::run_function(uint32_t func_idx) {
 // Heap allocation
 // ============================================================================
 
-uint32_t Interpreter::alloc_object(uint32_t type_idx) {
+Result<uint32_t> Interpreter::alloc_object(uint32_t type_idx) {
+    if (type_idx >= mod_.types.size())
+        return err(VmErrorKind::InvalidTypeIndex,
+                   "type index " + std::to_string(type_idx) +
+                   " out of bounds (" + std::to_string(mod_.types.size()) + ")");
     const auto& type = mod_.types[type_idx];
     std::vector<uint8_t> data(type.instance_size, 0);
     uint32_t handle = static_cast<uint32_t>(heap_.size());
@@ -65,9 +77,13 @@ uint32_t Interpreter::alloc_object(uint32_t type_idx) {
 // Call/Return are handled iteratively: Call pushes a new frame and the
 // outer while loop picks it up naturally; Ret pops the frame and restores
 // the caller's PC.
+//
+// Error handling: recoverable errors (bad indices, type mismatches)
+// return Err(VmError) which propagates up. Stack underflow and other
+// invariant violations abort — they indicate a VM bug, not a user error.
 // ============================================================================
 
-Value Interpreter::execute() {
+Result<Value> Interpreter::execute() {
     // Inline read helpers (sugar over raw bytecode access)
     auto r16 = [](const uint8_t* c, uint32_t& p) -> uint16_t {
         uint16_t v = static_cast<uint16_t>(c[p]) | (static_cast<uint16_t>(c[p+1]) << 8);
@@ -93,6 +109,7 @@ Value Interpreter::execute() {
 
     while (!frames_.empty()) {
         Frame& frame = frames_.back();
+        current_func_name_ = frame.func->debug_name;
         const uint8_t* code = frame.func->code.data();
         size_t code_size    = frame.func->code.size();
         uint32_t pc         = static_cast<uint32_t>(frame.pc - code);
@@ -204,21 +221,16 @@ Value Interpreter::execute() {
                 // ── Field access ────────────────────────────────────────
                 case objectrt::Opcode::Ldfld: {
                     uint16_t fi = r16(code, pc);
-                    if (fi >= mod_.fields.size()) {
-                        std::cerr << "ERROR: ldfld invalid field index " << fi << "\n";
-                        push(Value::nil()); break;
-                    }
+                    if (fi >= mod_.fields.size())
+                        return err(VmErrorKind::InvalidFieldIndex,
+                                   "ldfld invalid field index " + std::to_string(fi), pc);
                     const auto& field = mod_.fields[fi];
                     Value obj = pop();
-                    if (obj.tag != ValueTag::Obj) {
-                        std::cerr << "ERROR: ldfld on non-object\n";
-                        push(Value::nil()); break;
-                    }
+                    if (obj.tag != ValueTag::Obj)
+                        return err(VmErrorKind::NotAnObject, "ldfld on non-object", pc);
                     uint32_t h = obj.as_obj();
-                    if (h >= heap_.size() || field.offset + sizeof(Value) > heap_[h].size()) {
-                        std::cerr << "ERROR: ldfld out of bounds\n";
-                        push(Value::nil()); break;
-                    }
+                    if (h >= heap_.size() || field.offset + sizeof(Value) > heap_[h].size())
+                        return err(VmErrorKind::OutOfBounds, "ldfld out of bounds", pc);
                     Value v;
                     std::memcpy(&v, &heap_[h][field.offset], sizeof(v));
                     push(v);
@@ -227,42 +239,35 @@ Value Interpreter::execute() {
                 }
                 case objectrt::Opcode::Stfld: {
                     uint16_t fi = r16(code, pc);
-                    if (fi >= mod_.fields.size()) {
-                        std::cerr << "ERROR: stfld invalid field index " << fi << "\n";
-                        pop(); pop(); break;
-                    }
+                    if (fi >= mod_.fields.size())
+                        return err(VmErrorKind::InvalidFieldIndex,
+                                   "stfld invalid field index " + std::to_string(fi), pc);
                     const auto& field = mod_.fields[fi];
                     Value val = pop();
                     Value obj = pop();
-                    if (obj.tag != ValueTag::Obj) {
-                        std::cerr << "ERROR: stfld on non-object\n";
-                        break;
-                    }
+                    if (obj.tag != ValueTag::Obj)
+                        return err(VmErrorKind::NotAnObject, "stfld on non-object", pc);
                     uint32_t h = obj.as_obj();
-                    if (h >= heap_.size() || field.offset + sizeof(Value) > heap_[h].size()) {
-                        std::cerr << "ERROR: stfld out of bounds\n";
-                        break;
-                    }
+                    if (h >= heap_.size() || field.offset + sizeof(Value) > heap_[h].size())
+                        return err(VmErrorKind::OutOfBounds, "stfld out of bounds", pc);
                     std::memcpy(&heap_[h][field.offset], &val, sizeof(val));
                     if (trace_) std::cout << "stfld " << field.debug_name << "\n";
                     break;
                 }
                 case objectrt::Opcode::Ldsfld: {
                     uint16_t fi = r16(code, pc);
-                    if (fi >= static_fields_.size()) {
-                        std::cerr << "ERROR: ldsfld invalid static field index " << fi << "\n";
-                        push(Value::nil()); break;
-                    }
+                    if (fi >= static_fields_.size())
+                        return err(VmErrorKind::InvalidFieldIndex,
+                                   "ldsfld invalid static field index " + std::to_string(fi), pc);
                     push(static_fields_[fi]);
                     if (trace_) std::cout << "ldsfld " << mod_.fields[fi].debug_name << "\n";
                     break;
                 }
                 case objectrt::Opcode::Stsfld: {
                     uint16_t fi = r16(code, pc);
-                    if (fi >= static_fields_.size()) {
-                        std::cerr << "ERROR: stsfld invalid static field index " << fi << "\n";
-                        pop(); break;
-                    }
+                    if (fi >= static_fields_.size())
+                        return err(VmErrorKind::InvalidFieldIndex,
+                                   "stsfld invalid static field index " + std::to_string(fi), pc);
                     static_fields_[fi] = pop();
                     if (trace_) std::cout << "stsfld " << mod_.fields[fi].debug_name << "\n";
                     break;
@@ -272,10 +277,9 @@ Value Interpreter::execute() {
                 case objectrt::Opcode::Call:
                 case objectrt::Opcode::Callvirt: {
                     uint32_t fi = r32(code, pc);
-                    if (fi >= mod_.functions.size()) {
-                        std::cerr << "ERROR: invalid func idx " << fi << "\n";
-                        return Value::nil();
-                    }
+                    if (fi >= mod_.functions.size())
+                        return err(VmErrorKind::InvalidFunctionIndex,
+                                   "call invalid function index " + std::to_string(fi), pc);
                     if (trace_) std::cout << "call " << mod_.functions[fi].debug_name << "\n";
 
                     const auto& callee = mod_.functions[fi];
@@ -349,12 +353,12 @@ Value Interpreter::execute() {
                 // ── Object ops ───────────────────────────────────────────
                 case objectrt::Opcode::Newobj: {
                     uint16_t ti = r16(code, pc);
-                    if (ti >= mod_.types.size()) {
-                        std::cerr << "ERROR: newobj invalid type index " << ti << "\n";
-                        push(Value::nil()); break;
-                    }
-                    uint32_t handle = alloc_object(ti);
-                    push(Value::from_obj(handle));
+                    if (ti >= mod_.types.size())
+                        return err(VmErrorKind::InvalidTypeIndex,
+                                   "newobj invalid type index " + std::to_string(ti), pc);
+                    auto alloc_res = alloc_object(ti);
+                    if (!alloc_res) return std::move(alloc_res).error();
+                    push(Value::from_obj(alloc_res.value()));
                     if (trace_) std::cout << "newobj " << mod_.types[ti].debug_name << "\n";
                     break;
                 }

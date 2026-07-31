@@ -21,13 +21,16 @@ namespace objectrt::vm {
 //   - String pool        → deduplicated, indexed string table
 //   - Branch targets     → recomputed PC-relative offsets
 //   - Max stack depth    → pre-computed per function
+//
+// Error handling: compile() returns a Result — unresolved references
+// produce Err(VmError) rather than logging to stderr.
 // ============================================================================
 
 class ModuleCompiler {
 public:
     ModuleCompiler();
 
-    CompiledModule compile(const objectrt::ORBTModule& src);
+    Result<CompiledModule> compile(const objectrt::ORBTModule& src);
 
 private:
     // ── Resolution tables built during compilation ────────────────────
@@ -49,11 +52,12 @@ private:
         uint32_t                 old_first_pc = 0;
         uint32_t                 max_stack_depth = 0;
         uint32_t                 current_depth = 0;
+        std::string              error;      // non-empty = compilation failed
     };
 
     // ── Compilation helpers ──────────────────────────────────────────
     void build_resolution_tables(const objectrt::ORBTModule& src);
-    CompiledFunction compile_method(
+    Result<CompiledFunction> compile_method(
         const objectrt::ORBTModule& src,
         const objectrt::TypeRecord& type,
         const objectrt::MethodRecord& method,
@@ -82,7 +86,7 @@ private:
 // Convenience
 // ============================================================================
 
-CompiledModule compile_module(const objectrt::ORBTModule& src);
+Result<CompiledModule> compile_module(const objectrt::ORBTModule& src);
 
 } // namespace objectrt::vm
 

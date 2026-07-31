@@ -18,6 +18,11 @@ namespace objectrt::vm {
 // dispatch. This is the hot path.
 //
 // Value representation: 64-bit tagged union (simple boxed model).
+//
+// Error handling: All public methods return Result<Value>. Internal VM bugs
+// (stack underflow, etc.) abort — they represent invariant violations.
+// Recoverable errors (bad bytecode, invalid indices, type errors) are
+// returned as VmError values and propagate up through Result.
 // ============================================================================
 
 enum class ValueTag : uint8_t {
@@ -72,10 +77,10 @@ public:
 
     // Run from the module's entry point.
     // Returns the top-of-stack value (or nil for void).
-    Value run();
+    Result<Value> run();
 
     // Run a specific function by index.
-    Value run_function(uint32_t func_idx);
+    Result<Value> run_function(uint32_t func_idx);
 
     // Accessors
     const CompiledModule& module() const { return mod_; }
@@ -97,23 +102,35 @@ private:
     // Static field storage — one Value per module field
     std::vector<Value> static_fields_;
 
+    // Current function name for error context (set during execute())
+    std::string current_func_name_;
+
     // Execute from the current frame's PC (iterative dispatch)
-    Value execute();
+    Result<Value> execute();
 
     // Allocate a new object of the given type index on the heap.
     // Returns the handle (index into heap_).
-    uint32_t alloc_object(uint32_t type_idx);
+    Result<uint32_t> alloc_object(uint32_t type_idx);
 
-    // Value stack operations
+    // Value stack operations.
+    // pop() aborts on underflow — it signals a VM invariant violation.
     void push(Value v) { stack_.push_back(v); }
     Value pop() {
-        if (stack_.empty()) { std::cerr << "FATAL: stack underflow\n"; return Value::nil(); }
+        if (stack_.empty()) {
+            std::cerr << "VM BUG: stack underflow in " << current_func_name_ << "\n";
+            std::abort();
+        }
         Value v = stack_.back();
         stack_.pop_back();
         return v;
     }
     Value peek(int depth = 0) const {
         return stack_[stack_.size() - 1 - depth];
+    }
+
+    // Build a VmError with the current function context.
+    VmError err(VmErrorKind kind, std::string msg, uint32_t pc = 0) const {
+        return VmError(kind, std::move(msg), current_func_name_, pc);
     }
 };
 

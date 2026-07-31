@@ -1,0 +1,66 @@
+// ── ObjectRT NES emulator frontend script ────────────────────────────
+// All emulator driving happens here through host bindings. The C# side
+// only owns the window and game loop; this script steps the 6502/PPU,
+// reads input, uploads pixels and draws the framebuffer:
+//
+//   call Nes.CreateTexture()
+//   call Nes.LoadRom()
+//   call Nes.ReadInput()
+//   call Nes.StepFrame()
+//   call Nes.UploadFrame()
+//   call MonoGame.Sprite.DrawScaled(string, float32, float32, float32, float32)
+//
+// Press R to soft-reset the console.
+
+module NesFront version 1.0.0
+
+.metadata {
+    spec objectrt = "1.0"
+}
+
+class Game {
+    static field frame: int32
+
+    static method Init() -> void {
+        ldc.i4 0
+        stsfld Game.frame
+        call Nes.CreateTexture()
+        call Nes.LoadRom()
+        // Boot the console (runs the reset vector, waits for vblank, draws)
+        call Nes.StepFrame()
+        ret
+    }
+
+    static method Update(dt: float32) -> void {
+        ldsfld Game.frame
+        ldc.i4 1
+        add
+        stsfld Game.frame
+
+        // R = soft reset
+        ldc.i4 82
+        call MonoGame.Input.KeyPressed(int32)
+        if (stack) {
+            call Nes.Reset()
+        }
+
+        call Nes.ReadInput()
+        call Nes.StepFrame()
+        ret
+    }
+
+    static method Draw() -> void {
+        call Nes.UploadFrame()
+        call MonoGame.Color.Black()
+        call MonoGame.Screen.Clear(int32)
+        call MonoGame.Sprite.Begin()
+        ldstr "screen"
+        ldc.r4 384.0
+        ldc.r4 360.0
+        ldc.r4 3.0
+        ldc.r4 3.0
+        call MonoGame.Sprite.DrawScaled(string, float32, float32, float32, float32)
+        call MonoGame.Sprite.End()
+        ret
+    }
+}

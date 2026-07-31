@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <Description>Pure C# NES emulator core (6502 CPU + PPU + iNES loader, mappers 0/1/2). No external dependencies.</Description>
+  </PropertyGroup>
+
+</Project>

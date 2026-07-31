@@ -7,6 +7,9 @@
 #include <cstdint>
 #include <unordered_map>
 #include <stdexcept>
+#include <functional>
+
+#include "Error.hpp"
 
 namespace objectrt::vm {
 
@@ -93,7 +96,7 @@ public:
     // ── Debug maps (not used at runtime, dropped in release) ───────────
     std::unordered_map<std::string, uint32_t> function_map;
 
-    // ── Fast lookups ───────────────────────────────────────────────────
+    // ── Fast lookups (throw on failure — legacy) ──────────────────────
     uint32_t find_function(const std::string& name) const {
         auto it = function_map.find(name);
         if (it == function_map.end())
@@ -114,6 +117,42 @@ public:
     }
 
     bool has_entry() const { return entry_function < functions.size(); }
+
+    // ── Result-based lookups (Rust-style, no exceptions) ──────────────
+    Result<uint32_t> try_find_function(const std::string& name) const {
+        auto it = function_map.find(name);
+        if (it == function_map.end())
+            return VmError(VmErrorKind::FunctionNotFound,
+                           "function not found: " + name);
+        return it->second;
+    }
+
+    Result<std::reference_wrapper<const CompiledFunction>>
+    try_get_function(uint32_t idx) const {
+        if (idx >= functions.size())
+            return VmError(VmErrorKind::InvalidFunctionIndex,
+                           "function index " + std::to_string(idx) +
+                           " out of bounds (" + std::to_string(functions.size()) + ")");
+        return std::ref(functions[idx]);
+    }
+
+    Result<std::reference_wrapper<const VMType>>
+    try_get_type(uint32_t idx) const {
+        if (idx >= types.size())
+            return VmError(VmErrorKind::InvalidTypeIndex,
+                           "type index " + std::to_string(idx) +
+                           " out of bounds (" + std::to_string(types.size()) + ")");
+        return std::ref(types[idx]);
+    }
+
+    Result<std::reference_wrapper<const std::string>>
+    try_get_string(uint32_t idx) const {
+        if (idx >= strings.size())
+            return VmError(VmErrorKind::InvalidStringIndex,
+                           "string index " + std::to_string(idx) +
+                           " out of bounds (" + std::to_string(strings.size()) + ")");
+        return std::ref(strings[idx]);
+    }
 
     // ── Validation ─────────────────────────────────────────────────────
     bool valid() const {

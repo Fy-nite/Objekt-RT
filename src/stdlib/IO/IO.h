@@ -2,6 +2,6 @@
 extern "C" {
     class IO
     {
-        static void Println(std::string value)
+        static void Println(std::string value);
     };
 }

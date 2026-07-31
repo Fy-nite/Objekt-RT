@@ -159,13 +159,12 @@ int main(int argc, char* argv[]) {
 
     // ── Compile to VM bytecode and execute ────────────────────────────
     std::cout << "; Compiling to VM bytecode...\n\n";
-    objectrt::vm::CompiledModule compiled;
-    try {
-        compiled = objectrt::vm::compile_module(*module);
-    } catch (const std::exception& e) {
-        std::cerr << "Compilation error: " << e.what() << "\n";
+    auto compile_result = objectrt::vm::compile_module(*module);
+    if (!compile_result) {
+        std::cerr << "Compilation error: " << compile_result.error().to_string() << "\n";
         return 1;
     }
+    objectrt::vm::CompiledModule compiled = std::move(compile_result).value();
 
     // Print compiled layout
     std::cout << "; Compiled module: " << compiled.functions.size()
@@ -191,25 +190,26 @@ int main(int argc, char* argv[]) {
     objectrt::vm::Interpreter vm(compiled);
     vm.set_trace(trace);
 
-    try {
-        objectrt::vm::Value result = vm.run();
-        std::cout << "; Execution complete";
-        if (result.tag != objectrt::vm::ValueTag::Nil) {
-            std::cout << " (result: ";
-            switch (result.tag) {
-                case objectrt::vm::ValueTag::I4: std::cout << result.i4; break;
-                case objectrt::vm::ValueTag::I8: std::cout << result.i8; break;
-                case objectrt::vm::ValueTag::R4: std::cout << result.r4; break;
-                case objectrt::vm::ValueTag::R8: std::cout << result.r8; break;
-                default: std::cout << "?"; break;
-            }
-            std::cout << ")";
-        }
-        std::cout << "\n";
-    } catch (const std::exception& e) {
-        std::cerr << "Runtime error: " << e.what() << "\n";
+    auto run_result = vm.run();
+    if (!run_result) {
+        std::cerr << "Runtime error: " << run_result.error().to_string() << "\n";
         return 1;
     }
+
+    objectrt::vm::Value result = std::move(run_result).value();
+    std::cout << "; Execution complete";
+    if (result.tag != objectrt::vm::ValueTag::Nil) {
+        std::cout << " (result: ";
+        switch (result.tag) {
+            case objectrt::vm::ValueTag::I4: std::cout << result.i4; break;
+            case objectrt::vm::ValueTag::I8: std::cout << result.i8; break;
+            case objectrt::vm::ValueTag::R4: std::cout << result.r4; break;
+            case objectrt::vm::ValueTag::R8: std::cout << result.r8; break;
+            default: std::cout << "?"; break;
+        }
+        std::cout << ")";
+    }
+    std::cout << "\n";
 
     return 0;
 }

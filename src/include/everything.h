@@ -11,7 +11,7 @@
 #include <lua.hpp>
 #include <assert.h>
 #include <argparse.hpp>
-
+#include <gtest/gtest.h>
 
 
 #endif

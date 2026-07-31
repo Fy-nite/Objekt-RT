@@ -1,0 +1,13 @@
+<Project>
+  <PropertyGroup>
+    <Authors>charlie santana</Authors>
+    <Company>Finite</Company>
+    <Copyright>Copyright (c) 2026 Finite</Copyright>
+    <PackageProjectUrl>https://github.com/fy-nite/ObjectRT</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/fi-nite/ObjectRT</RepositoryUrl>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <Description>ObjectRT — embeddable scripting runtime for .NET</Description>
+    <PackageTags>scripting;vm;bytecode;interpreter;objectil;orbt</PackageTags>
+    <Version>1.0.0-dev</Version>
+  </PropertyGroup>
+</Project>

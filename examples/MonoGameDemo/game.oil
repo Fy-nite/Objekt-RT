@@ -1,0 +1,179 @@
+// ── ObjectRT x MonoGame demo script ──────────────────────────────────
+// A bouncing ball written entirely in ObjectIL. The C# host only pumps
+// the game loop; this script drives MonoGame through host bindings. The
+// `call` opcode resolves to a module function first and a host method
+// (MonoGame.*) as fallback:
+//
+//   call MonoGame.Screen.Clear(int32)
+//   call MonoGame.Texture.CreateChecker(string, int32, int32, int32, int32)
+//   call MonoGame.Input.KeyPressed(int32)
+//   call MonoGame.Sprite.Begin()
+//   call MonoGame.Sprite.FillRect(float32, float32, float32, float32, int32)
+//   call MonoGame.Sprite.DrawColored(string, float32, float32, int32)
+//   call MonoGame.Sprite.End()
+//
+// Keys: Space doubles the ball speed, Esc quits (handled by the host).
+
+module Bouncy version 1.0.0
+
+.metadata {
+    spec objectrt = "1.0"
+}
+
+class Game {
+    static field x: float32
+    static field y: float32
+    static field vx: float32
+    static field vy: float32
+    static field size: float32
+    static field frames: int32
+    static field color: int32
+
+    static method Init() -> void {
+        // Starting position / velocity / size
+        ldc.r4 160.0
+        stsfld Game.x
+        ldc.r4 120.0
+        stsfld Game.y
+        ldc.r4 190.0
+        stsfld Game.vx
+        ldc.r4 150.0
+        stsfld Game.vy
+        ldc.r4 40.0
+        stsfld Game.size
+        ldc.i4 0
+        stsfld Game.frames
+        call MonoGame.Color.White()
+        stsfld Game.color
+
+        // Ball texture: 32x32 white/blue checkerboard
+        ldstr "ball"
+        ldc.i4 32
+        ldc.i4 32
+        call MonoGame.Color.White()
+        call MonoGame.Color.Blue()
+        call MonoGame.Texture.CreateChecker(string, int32, int32, int32, int32)
+
+        ldstr "ball"
+        call MonoGame.Log.Log(string)
+        ret
+    }
+
+    static method Update(dt: float32) -> void {
+        // frames++
+        ldsfld Game.frames
+        ldc.i4 1
+        add
+        stsfld Game.frames
+
+        // Space = double the speed
+        ldc.i4 32
+        call MonoGame.Input.KeyPressed(int32)
+        if (stack) {
+            ldsfld Game.vx
+            ldc.r4 2.0
+            mul
+            stsfld Game.vx
+            ldsfld Game.vy
+            ldc.r4 2.0
+            mul
+            stsfld Game.vy
+        }
+
+        // x += vx * dt
+        ldsfld Game.x
+        ldsfld Game.vx
+        ldarg dt
+        mul
+        add
+        stsfld Game.x
+
+        // y += vy * dt
+        ldsfld Game.y
+        ldsfld Game.vy
+        ldarg dt
+        mul
+        add
+        stsfld Game.y
+
+        // Bounce off the edges
+        ldsfld Game.x
+        ldc.r4 20.0
+        clt
+        if (stack) {
+            ldsfld Game.vx
+            neg
+            stsfld Game.vx
+        }
+        ldsfld Game.x
+        ldc.r4 780.0
+        cgt
+        if (stack) {
+            ldsfld Game.vx
+            neg
+            stsfld Game.vx
+        }
+        ldsfld Game.y
+        ldc.r4 20.0
+        clt
+        if (stack) {
+            ldsfld Game.vy
+            neg
+            stsfld Game.vy
+        }
+        ldsfld Game.y
+        ldc.r4 580.0
+        cgt
+        if (stack) {
+            ldsfld Game.vy
+            neg
+            stsfld Game.vy
+        }
+
+        // Every 180 frames, pick a random color
+        ldsfld Game.frames
+        ldc.i4 18
+        rem
+        ldc.i4 0
+        ceq
+        if (stack) {
+            ldc.i4 256
+            call MonoGame.Math.RandomInt(int32)
+            ldc.i4 256
+            call MonoGame.Math.RandomInt(int32)
+            ldc.i4 256
+            call MonoGame.Math.RandomInt(int32)
+            call MonoGame.Color.Rgb(int32, int32, int32)
+            stsfld Game.color
+        }
+        ret
+    }
+
+    static method Draw() -> void {
+        call MonoGame.Color.Black()
+        call MonoGame.Screen.Clear(int32)
+        call MonoGame.Sprite.Begin()
+
+        // Shadow-ish dark square under the ball
+        ldsfld Game.x
+        ldc.r4 6.0
+        add
+        ldsfld Game.y
+        ldc.r4 6.0
+        add
+        ldsfld Game.size
+        ldsfld Game.size
+        call MonoGame.Color.Gray()
+        call MonoGame.Sprite.FillRect(float32, float32, float32, float32, int32)
+
+        // The ball itself (drawn centered at x, y)
+        ldstr "ball"
+        ldsfld Game.x
+        ldsfld Game.y
+        ldsfld Game.color
+        call MonoGame.Sprite.DrawColored(string, float32, float32, int32)
+
+        call MonoGame.Sprite.End()
+        ret
+    }
+}

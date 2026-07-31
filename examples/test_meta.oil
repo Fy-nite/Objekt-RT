@@ -1,0 +1,11 @@
+module Test version 1.0
+
+.metadata {
+    spec objectrt = "1.0"
+}
+
+class Foo {
+    static method Main() -> void {
+        ret
+    }
+}
