@@ -33,13 +33,32 @@ public sealed class Runtime
     public static Runtime Shared { get; } = new();
 
     private CompiledModule? _compiled;
-    private Interpreter? _interpreter;
+    private IExecutor? _executor;
 
     /// <summary>Explicitly registered native methods (fast path).</summary>
     private readonly Dictionary<string, Delegate> _nativeMethods = new(StringComparer.Ordinal);
 
     /// <summary>Pluggable resolver chain, tried after explicit registry.</summary>
     private readonly List<INativeResolver> _resolvers = new();
+
+    /// <summary>
+    /// The execution mode for VM functions.
+    ///   <see cref="JitMode.Interpreter"/> — iterative dispatch loop (default)
+    ///   <see cref="JitMode.Reflection"/> — compile-on-load via Roslyn C# emit
+    ///   Planned: <see cref="JitMode.LLVM"/> — NativeAOT-safe via LLVMSharp
+    /// </summary>
+    public JitMode Mode { get; set; } = JitMode.Interpreter;
+
+    /// <summary>
+    /// When set and <see cref="Mode"/> is <see cref="JitMode.Reflection"/>,
+    /// the generated C# source for compiled modules is written to this directory
+    /// as <c>{ModuleName}.ObjectRT.g.cs</c>. Leave null to skip disk output.
+    /// </summary>
+    public static string? EmitDir
+    {
+        get => ObjectRT.VM.ReflectionJit.EmitDir;
+        set => ObjectRT.VM.ReflectionJit.EmitDir = value;
+    }
 
     // ── Constructor ────────────────────────────────────────────────
 
@@ -160,21 +179,20 @@ public sealed class Runtime
             throw new InvalidOperationException($"Compilation failed: {result.Error}");
 
         _compiled = result.Value;
-        _interpreter = CreateInterpreter(_compiled);
+        _executor = CreateExecutor(_compiled);
     }
 
     /// <summary>Whether a module is currently loaded and ready.</summary>
     public bool IsLoaded => _compiled != null;
 
     /// <summary>
-    /// Reset the interpreter state between top-level calls.
-    /// Creates a fresh interpreter so per-call state (stack, frames) is clean.
-    /// Benchmark: only call this externally; CallMethod handles it internally.
+    /// Reset the executor state between top-level calls. Creates a fresh
+    /// executor so per-call state (stack, frames) is clean.
     /// </summary>
-    public void ResetInterpreter()
+    public void ResetExecutor()
     {
         if (_compiled != null)
-            _interpreter = CreateInterpreter(_compiled);
+            _executor = CreateExecutor(_compiled);
     }
 
     // ── Native method registration ─────────────────────────────────
@@ -280,14 +298,18 @@ public sealed class Runtime
         throw new MissingMethodException($"Native method '{name}' not found");
     }
 
-    private void AttachHostHandlers(Interpreter vm)
+    private void AttachHostHandlers(IExecutor vm)
     {
         vm.NativeCallHandler = ResolveNativeCall;
     }
 
-    private Interpreter CreateInterpreter(CompiledModule mod)
+    private IExecutor CreateExecutor(CompiledModule mod)
     {
-        var vm = new Interpreter(mod);
+        IExecutor vm = Mode switch
+        {
+            JitMode.Reflection => new ReflectionJit(mod),
+            _ => new Interpreter(mod),
+        };
         AttachHostHandlers(vm);
         return vm;
     }
@@ -300,9 +322,8 @@ public sealed class Runtime
         if (!_compiled.FunctionMap.TryGetValue(qualifiedName, out var funcIdx))
             throw new MissingMethodException($"Method '{qualifiedName}' not found in loaded module and no resolver handled it.");
 
-        // Create interpreter once, reuse for subsequent calls with Reset().
-        // This avoids the ~2μs+ allocation cost of new Interpreter() per call.
-        var vm = _interpreter ??= CreateInterpreter(_compiled);
+        // Reuse executor across calls — Reset() clears per-call state.
+        var vm = _executor ??= CreateExecutor(_compiled);
 
         var vmArgs = args.Length > 0 ? new Value[args.Length] : Array.Empty<Value>();
         for (int i = 0; i < args.Length; i++)

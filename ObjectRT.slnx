@@ -1,4 +1,7 @@
 <Solution>
+  <Folder Name="/build-support/">
+    <Project Path="build-support/jit-probe/jit-probe.csproj" />
+  </Folder>
   <Folder Name="/examples/" />
   <Folder Name="/examples/ScriptingDemo/">
     <Project Path="examples/ScriptingDemo/ObjectRT.ScriptingDemo.csproj" />

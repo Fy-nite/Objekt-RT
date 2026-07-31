@@ -10,17 +10,16 @@ public abstract class ExecutorBase : IExecutor
 {
     protected readonly CompiledModule Mod;
 
-    // Heap — each object is a byte buffer sized by the type's instance_size
-    protected readonly List<byte[]> Heap = new();
+    /// <summary>Heap — each object is a byte buffer sized by the type's instance_size.</summary>
+    public readonly List<byte[]> Heap = new();
 
-    // Static field storage
-    protected readonly Value[] StaticFields;
+    /// <summary>Static field storage.</summary>
+    public readonly Value[] StaticFields;
 
     // Interned string table (handles — the Value struct can't hold CLR refs).
     private readonly Dictionary<string, uint> _stringMap = new(StringComparer.Ordinal);
     private readonly List<string?> _strings = new();
 
-    /// <summary>Optional handler invoked by the <c>call</c> opcode for host methods.</summary>
     private Func<string, object?[], object?>? _nativeCall;
 
     public Func<string, object?[], object?>? NativeCallHandler
@@ -36,7 +35,7 @@ public abstract class ExecutorBase : IExecutor
         Array.Fill(StaticFields, Value.Nil());
     }
 
-    // ── Abstract (implemented by Interpreter / JIT) ──────────────────
+    // ── IExecutor ──────────────────────────────────────────────────
 
     public abstract Result<Value> RunFunction(uint funcIdx, Value[] args);
     public abstract void Reset(bool clearHeap = false, bool clearStatics = false);
@@ -48,7 +47,7 @@ public abstract class ExecutorBase : IExecutor
         return RunFunction(Mod.EntryFunction, Array.Empty<Value>());
     }
 
-    // ── String table ──────────────────────────────────────────────────
+    // ── String table ───────────────────────────────────────────────
 
     public uint InternString(string s)
     {
@@ -62,7 +61,7 @@ public abstract class ExecutorBase : IExecutor
     public string? GetStringValue(uint idx)
         => idx < _strings.Count ? _strings[(int)idx] : null;
 
-    // ── Value marshaling ──────────────────────────────────────────────
+    // ── Value marshaling ───────────────────────────────────────────
 
     public Value MarshalValue(object? val) => val switch
     {
@@ -77,14 +76,13 @@ public abstract class ExecutorBase : IExecutor
         _ => Value.ToObject(v),
     };
 
-    // ── Heap helpers ─────────────────────────────────────────────────
+    // ── Heap allocation ────────────────────────────────────────────
 
     protected Result<uint> AllocObject(uint typeIdx)
     {
         if (typeIdx >= Mod.Types.Count)
             return new VmError(VmErrorKind.InvalidTypeIndex,
                 $"type index {typeIdx} out of bounds ({Mod.Types.Count})");
-
         var type = Mod.GetType(typeIdx);
         var data = new byte[type.InstanceSize];
         uint handle = (uint)Heap.Count;
