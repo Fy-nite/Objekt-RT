@@ -1,0 +1,3 @@
+[submodule "src/ObjektRT.Core"]
+	path = src/ObjektRT.Core
+	url = https://git.finite.ovh/ObjektRT.Core
