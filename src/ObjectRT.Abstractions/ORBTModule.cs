@@ -23,6 +23,8 @@ public class StringPool
 
 // ── Records within types ───────────────────────────────────────────────────
 
+public record AttributeRecord(ushort NameIndex, List<ushort> ArgIndices);
+
 public record FieldRecord(ushort NameIndex, ushort TypeIndex);
 
 public record ParameterRecord(ushort NameIndex, ushort TypeIndex);
@@ -46,6 +48,7 @@ public record MethodRecord
     public uint InstrCount { get; set; }
     public List<Instruction> Instructions { get; set; } = new();
     public byte[] RawInstructionData { get; set; } = Array.Empty<byte>();
+    public List<AttributeRecord> Attributes { get; set; } = new();
 }
 
 public record TypeRecord
@@ -62,6 +65,7 @@ public record TypeRecord
     public List<FieldRecord> Fields { get; set; } = new();
     public ushort MethodCount { get; set; }
     public List<MethodRecord> Methods { get; set; } = new();
+    public List<AttributeRecord> Attributes { get; set; } = new();
 }
 
 // ── Import/Export ─────────────────────────────────────────────────────────

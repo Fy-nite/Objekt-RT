@@ -60,6 +60,17 @@ public sealed class Runtime
         set => ObjectRT.VM.ReflectionJit.EmitDir = value;
     }
 
+    /// <summary>
+    /// When set and <see cref="Mode"/> is <see cref="JitMode.Reflection"/>,
+    /// compiled assemblies are cached to this directory as <c>{hash}.dll</c>.
+    /// Subsequent runs skip Roslyn compilation when the module hasn't changed.
+    /// </summary>
+    public static string? CacheDir
+    {
+        get => ObjectRT.VM.ReflectionJit.CacheDir;
+        set => ObjectRT.VM.ReflectionJit.CacheDir = value;
+    }
+
     // ── Constructor ────────────────────────────────────────────────
 
     /// <summary>
@@ -80,6 +91,16 @@ public sealed class Runtime
         // reflection fallback). Disable via HostResolver.AllowReflection = false.
         HostResolver = new InterfaceHostResolver();
         _resolvers.Add(HostResolver);
+
+        // IR-level @NativeBinding resolver — reads module metadata for host
+        // bindings declared in the ObjectIL source. Coexists with HostResolver.
+        NativeResolver = new NativeBindingResolver();
+        _resolvers.Add(NativeResolver);
+
+        // @DllImport resolver — bridges ObjectIL calls to native P/Invoke
+        // libraries. Generates bridge assemblies on first use.
+        DllResolver = new DllImportResolver();
+        _resolvers.Add(DllResolver);
     }
 
     /// <summary>
@@ -96,20 +117,41 @@ public sealed class Runtime
     public InterfaceHostResolver HostResolver { get; }
 
     /// <summary>
+    /// Resolver for host objects registered through <c>@NativeBinding</c>
+    /// annotations in the module source. Complements <see cref="HostResolver"/>:
+    /// this path is driven by IR-level metadata, the other by C# interface
+    /// contracts. Both register hosts through the same <c>RegisterHost</c> API.
+    /// </summary>
+    public NativeBindingResolver NativeResolver { get; }
+
+    /// <summary>
+    /// Resolver for <c>@DllImport("lib.dll")</c> native library bindings.
+    /// Generates P/Invoke bridge assemblies via Roslyn on first use and
+    /// caches them. All marshaling is handled by the CLR.
+    /// </summary>
+    public DllImportResolver DllResolver { get; }
+
+    /// <summary>
     /// Register a host implementation under its binding name. Scripts call it
     /// as <c>callnative Name.Method(...)</c>. Prefer interfaces marked with
     /// <see cref="IRHostBindingAttribute"/> so the source generator emits a
     /// reflection-free dispatch adapter.
     /// </summary>
     public void RegisterHost<T>(string name, T host) where T : class
-        => HostResolver.RegisterHost(name, host);
+    {
+        HostResolver.RegisterHost(name, host);
+        NativeResolver.RegisterHost(name, host, typeof(T));
+    }
 
     /// <summary>
     /// Register a host implementation under its binding name with an explicit
     /// interface type.
     /// </summary>
     public void RegisterHost(string name, object host, Type interfaceType)
-        => HostResolver.RegisterHost(name, host, interfaceType);
+    {
+        HostResolver.RegisterHost(name, host, interfaceType);
+        NativeResolver.RegisterHost(name, host, interfaceType);
+    }
 
     /// <summary>
     /// Register a type with the CLR resolver so its static methods
@@ -174,6 +216,19 @@ public sealed class Runtime
     /// <summary>Load an ObjectRT module from an already-parsed ORBTModule.</summary>
     public void LoadModule(ORBTModule module)
     {
+        // Strip placeholder bodies from @DllImport classes so the interpreter
+        // falls through to the DllImportResolver instead of executing the stub.
+        foreach (var type in module.Types)
+        {
+            bool isDllImport = type.Attributes.Any(a =>
+                module.Resolve(a.NameIndex) == "DllImport");
+            if (isDllImport)
+            {
+                foreach (var m in type.Methods)
+                    m.RawInstructionData = new byte[] { 0x18 }; // single "ret"
+            }
+        }
+
         var result = VmCompiler.Compile(module);
         if (result.IsError)
             throw new InvalidOperationException($"Compilation failed: {result.Error}");

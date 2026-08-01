@@ -571,3 +571,96 @@ Resolution proceeds as follows:
    fields are merged into the unified state. The instruction stream
    requires no patching — all operands already reference the correct
    indices after resolution.
+
+= Runtime Extensions
+
+A conforming runtime may extend the base ObjectRT model with additional
+interoperability mechanisms. This section defines three optional extensions
+that a runtime *may* implement.
+
+== Type Annotations
+
+Types may carry zero or more annotation records (`AttributeRecord`) attached
+at parse time. An annotation consists of a name and an ordered list of
+positional argument strings.
+
+In the ObjectIL text format, annotations are written with the `@`
+prefix immediately before the type keyword:
+
+```
+@DllImport("kernel32.dll")
+class Kernel32 { ... }
+```
+
+Annotations are not instruction operands — they are declarative metadata
+consumed by the runtime during module loading.
+
+== Native Library Bindings (`@DllImport`)
+
+A runtime *may* recognise the `@DllImport` annotation on type
+declarations. Each `static method` within an `@DllImport`-annotated class
+defines a binding to a native function exported by the named library.
+
+The method signature in the declaration dictates the parameter and return
+types expected at the native boundary. The runtime maps ObjectIR primitive
+types to their host-ABI equivalents:
+
+| IR type | C# type | C/C++ type (Windows) |
+|---------|---------|-----------------------|
+| `int32` | `int` | `int32_t` / `int` |
+| `uint32` | `uint` | `uint32_t` |
+| `int64` | `long` | `int64_t` |
+| `float32` | `float` | `float` |
+| `float64` | `double` | `double` |
+| `string` | `string` (LPWStr) | `const wchar_t*` |
+| `void` | `void` | `void` |
+| `bool` | `bool` | `BOOL` (int) |
+| `int8` | `sbyte` | `int8_t` |
+
+The method body declared in the source is a placeholder — the runtime
+bypasses it and dispatches directly to the native function. Every
+`call QualifiedType.MethodName(...)` whose qualified type name matches
+an `@DllImport`-annotated class resolves against the native binding table
+before the module function map is consulted.
+
+== Host Object Bindings (`@NativeBinding`)
+
+A runtime *may* recognise the `@NativeBinding("name")` annotation on type
+declarations. This marks the class as a logical namespace through which
+scripts access methods on objects supplied by the host program at
+registration time.
+
+Unlike `@DllImport`, the method bodies are not linked to native exports
+— the runtime dispatches calls through a host-provided object reference
+that implements a matching interface contract. The binding name is the
+first argument to the annotation and becomes the qualified prefix for
+script calls:
+
+```
+@NativeBinding("MonoGame.Sprite")
+class SpriteBindings {
+    static method Draw(tex: string, x: float32, y: float32) -> void { ret }
+}
+```
+
+Scripts call: `call MonoGame.Sprite.Draw(string, float32, float32)`.
+
+This extension allows the same ObjectIL module to target different hosts
+simply by changing which implementation objects are registered under well-
+known binding names. The type metadata is self-describing — no external
+configuration or C# source generation is required for the binding contract
+to be understood by a conforming runtime.
+
+== Call Resolution with Extensions
+
+When both `@DllImport` and `@NativeBinding` annotations are present in a
+module, the runtime resolves a `call` opcode as follows:
+
+1. Check the module function map (script-defined methods).
+2. Check the native binding table (host-registered `@NativeBinding` types).
+3. Check the DllImport table (native library exports).
+4. Return an unresolved error to the caller.
+
+This ordering ensures that module-local functions always take priority,
+host-provided methods override library functions, and native exports
+serve as the final fallback.

@@ -152,12 +152,16 @@ public sealed class Interpreter : ExecutorBase
                         if (op != (ushort)Opcode.NativeCall && Mod.FunctionMap.TryGetValue(name, out var cfi))
                         {
                             var callee = Mod.GetFunction(cfi);
-                            if (callee.Code.Length == 0) { Push(Value.Nil()); break; }
-                            var locals = new Value[callee.NumParams + callee.NumLocals + 1];
-                            Array.Fill(locals, Value.Nil());
-                            for (int ai = (int)callee.NumParams - 1; ai >= 0; ai--) locals[ai] = Pop();
-                            _frames.Add(new Frame { Func = callee, Pc = 0, StackBase = (uint)_stack.Count, Locals = locals, RetFunc = frame.Func.SelfIndex, RetPc = pc });
-                            goto nextFrame;
+                            // Empty or single-ret body (e.g. @DllImport placeholder) — fall through to native.
+                            if (callee.Code.Length <= 2) { /* fall through */ }
+                            else
+                            {
+                                var locals = new Value[callee.NumParams + callee.NumLocals + 1];
+                                Array.Fill(locals, Value.Nil());
+                                for (int ai = (int)callee.NumParams - 1; ai >= 0; ai--) locals[ai] = Pop();
+                                _frames.Add(new Frame { Func = callee, Pc = 0, StackBase = (uint)_stack.Count, Locals = locals, RetFunc = frame.Func.SelfIndex, RetPc = pc });
+                                goto nextFrame;
+                            }
                         }
 
                         var handler = NativeCallHandler;

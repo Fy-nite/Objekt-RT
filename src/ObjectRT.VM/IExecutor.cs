@@ -40,4 +40,11 @@ public interface IExecutor
     /// cleared. The heap and static fields are preserved by default.
     /// </summary>
     void Reset(bool clearHeap = false, bool clearStatics = false);
+
+    /// <summary>
+    /// Whether a specific function has been compiled by the JIT engine.
+    /// The interpreter returns true for all functions (always available);
+    /// <see cref="ReflectionJit"/> returns true when Roslyn has finished.
+    /// </summary>
+    bool IsCompiled(uint funcIdx) => true;
 }

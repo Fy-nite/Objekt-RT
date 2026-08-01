@@ -25,6 +25,7 @@ public enum TokenKind
     OpenBracket,
     CloseBracket,
     DotMetadata, // .metadata
+    Annotation,  // @attr
 }
 
 public record Token(TokenKind Kind, string Text, int Line, int Col);
@@ -57,6 +58,7 @@ public class ObjectILTokenizer
     }
 
     private char Peek() => _pos < _input.Length ? _input[_pos] : '\0';
+    private char Peek2() => _pos + 1 < _input.Length ? _input[_pos + 1] : '\0';
     private char Advance()
     {
         char c = _input[_pos++];
@@ -203,6 +205,16 @@ public class ObjectILTokenizer
             return new Token(TokenKind.Arrow, "->", tokLine, tokCol);
         }
 
+        // @Annotation — only consumed when followed by an identifier start.
+        if (c == '@' && _pos + 1 < _input.Length && IsIdentStart(_input[_pos + 1]))
+        {
+            Advance(); // consume the @
+            var sb = new System.Text.StringBuilder("@");
+            while (_pos < _input.Length && IsIdentCont(Peek()))
+                sb.Append(Advance());
+            return new Token(TokenKind.Annotation, sb.ToString(), tokLine, tokCol);
+        }
+
         // Single-char tokens
         char single = Advance();
         return single switch
@@ -218,6 +230,7 @@ public class ObjectILTokenizer
             '}' => new Token(TokenKind.CloseBrace, "}", tokLine, tokCol),
             '[' => new Token(TokenKind.OpenBracket, "[", tokLine, tokCol),
             ']' => new Token(TokenKind.CloseBracket, "]", tokLine, tokCol),
+            '@' => new Token(TokenKind.Annotation, "@", tokLine, tokCol),
             _ => throw new FormatException($"Unexpected character '{single}' at {tokLine}:{tokCol}"),
         };
     }

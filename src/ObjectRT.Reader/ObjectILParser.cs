@@ -66,6 +66,42 @@ public class ObjectILParser
         return null;
     }
 
+    // ── Attribute parsing ──────────────────────────────────────────
+
+    /// <summary>
+    /// Parse one or more <c>@Attribute</c> annotations before a type or member
+    /// declaration. Returns the collected attribute records.
+    /// </summary>
+    private List<AttributeRecord> ParseAttributes(ORBTModule mod)
+    {
+        var attrs = new List<AttributeRecord>();
+        while (_tokenizer.PeekToken().Kind == TokenKind.Annotation)
+        {
+            var tok = _tokenizer.AdvanceToken();
+            // Strip leading '@' from the token text
+            var name = tok.Text[1..];
+            var nameIdx = mod.StringPool.Add(name);
+            var args = new List<ushort>();
+
+            if (_tokenizer.PeekToken().Kind == TokenKind.OpenParen)
+            {
+                _tokenizer.AdvanceToken();
+                while (_tokenizer.PeekToken().Kind != TokenKind.CloseParen
+                       && _tokenizer.PeekToken().Kind != TokenKind.Eof)
+                {
+                    var arg = _tokenizer.AdvanceToken();
+                    // String or integer literal; store its text in the string pool.
+                    args.Add(mod.StringPool.Add(arg.Text));
+                    TryMatch(TokenKind.Comma);
+                }
+                Expect(TokenKind.CloseParen);
+            }
+
+            attrs.Add(new AttributeRecord(nameIdx, args));
+        }
+        return attrs;
+    }
+
     // ── Grammar rules ───────────────────────────────────────────────
 
     private void ParseModuleDecl(ORBTModule mod)
@@ -165,6 +201,9 @@ public class ObjectILParser
             BaseTypeIndex = -1,
             NamespaceIndex = 0,
         };
+
+        // @Attributes before the type declaration.
+        type.Attributes = ParseAttributes(mod);
 
         while (_tokenizer.PeekToken().Kind == TokenKind.Keyword)
         {

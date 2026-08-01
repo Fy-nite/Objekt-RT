@@ -128,6 +128,31 @@ Unlisted keywords in the table above are reserved for future versions and
 must not be used as identifiers in v1. A conforming parser must reject
 programs that use keywords as identifiers.
 
+== Annotations
+
+An annotation begins with the `@` character immediately followed by an
+identifier. Annotations are recognised at the start of a type declaration
+and may carry an optional parenthesised argument list containing string
+or integer literals separated by commas.
+
+```
+@<identifier>
+@<identifier>("<string>")
+@<identifier>(<int>, <int>, "<string>")
+```
+
+`@` not followed by an identifier is treated as a single-character token
+(for example, it produces a parse error if encountered unexpectedly).
+
+The runtime-recognised annotation names in v1 are:
+
+- `@DllImport("library.dll")` — marks a class as a P/Invoke binding for
+  the named native library.
+- `@DllImport("library.dll", "EntryPointName")` — specifies an explicit
+  exported function name.
+- `@NativeBinding("BindingName")` — marks a class as a host binding
+  namespace for externally registered method implementations.
+
 == String Literals
 
 String literals are enclosed in double quotes (`"..."`) and support the
@@ -314,6 +339,7 @@ keyword (or `interface`, `struct`, `enum` — reserved in v1).
 == Grammar
 
 ```
+[<annotation>]*
 [abstract] [sealed] class <identifier>
     [implements <type-list>] {
     <member-declaration>*
@@ -336,6 +362,88 @@ class Program {
 
 abstract class BaseType {
     // ...
+}
+```
+
+== Type Annotations
+
+Type declarations may be prefixed with zero or more `@Annotation`
+directives. Annotations are placed on the line immediately preceding the
+type keyword (after any optional class modifiers) and may carry positional
+arguments.
+
+=== `@DllImport`
+
+The `@DllImport("library.dll")` annotation marks a class as a native
+library binding. Each `static method` in the class is treated as a
+P/Invoke declaration: the method name maps to an exported function in the
+named library, and parameter types are marshalled according to the
+standard ObjectIR-to-CLR type mapping.
+
+```oil
+@DllImport("kernel32.dll")
+class Kernel32 {
+    static method GetTickCount() -> int32 { ldc.i4 0 ret }
+    static method Sleep(ms: int32) -> void { ret }
+}
+
+@DllImport("user32.dll")
+class User32 {
+    static method MessageBox(hWnd: int32, text: string, caption: string, kind: int32) -> int32 { ldc.i4 0 ret }
+}
+```
+
+The method body is required by the parser but is unused — the runtime
+bypasses the body and dispatches directly to the native function. A
+minimal body (`ldc.i4 0 ret` / `ret`) serves as a placeholder.
+
+A conforming runtime should:
++ Build a P/Invoke bridge assembly (or equivalent native call stub) from the
+  declared signatures.
++ Marshal `string` parameters as `LPWStr` (Unicode) by default.
++ Map `int32` → `int`, `int64` → `long`, `float32` → `float`,
+  `float64` → `double`, `void` → `void`, matching the standard
+  ObjectIR-to-CLR type table.
++ Resolve `call ClassName.MethodName(...)` against the registered
+  `@DllImport` class before falling back to the module function map.
+
+=== `@NativeBinding`
+
+The `@NativeBinding("BindingName")` annotation marks a class as a host
+binding — a logical namespace through which ObjectIL scripts access
+methods on host-registered objects. This is the IR-level equivalent of
+`[IRHostBinding]` in the C# bindings API.
+
+```oil
+@NativeBinding("MonoGame.Screen")
+class ScreenBindings {
+    static method Clear(color: int32) -> void { ret }
+    static method Width() -> int32 { ret }
+}
+```
+
+Scripts call methods through the standard `call` opcode using the binding
+name:
+
+```oil
+call MonoGame.Screen.Clear(int32)
+call MonoGame.Screen.Width()
+```
+
+The host registers an implementation object under the binding name, and
+the runtime dispatches calls to it. Multiple `@NativeBinding` classes
+with different names may coexist in the same module.
+
+=== `@DllImport` with custom entry points
+
+When the exported function name does not match the ObjectIL method name,
+the first positional argument to `@DllImport` is the library name and an
+optional second argument is the entry point:
+
+```oil
+@DllImport("user32.dll", "MessageBoxW")
+class User32 {
+    static method MessageBox(hWnd: int32, text: string, caption: string, kind: int32) -> int32 { ldc.i4 0 ret }
 }
 ```
 

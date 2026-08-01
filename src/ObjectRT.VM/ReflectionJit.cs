@@ -24,7 +24,15 @@ public sealed class ReflectionJit : ExecutorBase
     /// </summary>
     public static string? EmitDir { get; set; }
 
-    public ReflectionJit(CompiledModule mod) : base(mod) { CompileAll(); }
+    /// <summary>
+    /// When non-null, compiled assemblies are cached to this directory as
+    /// <c>{hash}.dll</c> and reloaded on subsequent runs. The hash covers
+    /// all function bytecode + the string table, so recompilation via Roslyn
+    /// only happens when the module actually changes.
+    /// </summary>
+    public static string? CacheDir { get; set; }
+
+    public ReflectionJit(CompiledModule mod) : base(mod) { Task.Run(CompileAll); }
 
     public override void Reset(bool clearHeap = false, bool clearStatics = false)
     {
@@ -42,6 +50,9 @@ public sealed class ReflectionJit : ExecutorBase
         _fallback ??= new Interpreter(Mod) { NativeCallHandler = NativeCallHandler };
         return _fallback.RunFunction(funcIdx, args);
     }
+
+    /// <summary>Whether a specific function has been compiled yet.</summary>
+    public bool IsCompiled(uint funcIdx) => _compiled.ContainsKey(funcIdx);
 
     // ── Compilation ──────────────────────────────────────────────
 
@@ -72,13 +83,44 @@ public sealed class ReflectionJit : ExecutorBase
             try
             {
                 Directory.CreateDirectory(EmitDir);
-                var path = Path.Combine(EmitDir, $"{SafeModuleName(Mod.Functions[0]?.DebugName ?? "module")}.ObjectRT.g.cs");
-                File.WriteAllText(path, fullSource);
+                var emitPath = Path.Combine(EmitDir, $"{SafeModuleName(Mod.Functions[0]?.DebugName ?? "module")}.ObjectRT.g.cs");
+                File.WriteAllText(emitPath, fullSource);
             }
-            catch { /* best-effort, don't fail compilation over I/O */ }
+            catch { /* best-effort */ }
         }
 
-        var asm = CompileAssembly(fullSource);
+        // ── Disk cache: load cached assembly or compile + save ────
+        var hash = ComputeModuleHash();
+        Assembly? asm = null;
+
+        if (CacheDir is not null)
+        {
+            try
+            {
+                Directory.CreateDirectory(CacheDir);
+                var cachePath = Path.Combine(CacheDir, $"{hash}.dll");
+                if (File.Exists(cachePath))
+                {
+                    asm = Assembly.Load(File.ReadAllBytes(cachePath));
+                }
+                else
+                {
+                    asm = CompileAssembly(fullSource);
+                    if (s_lastEmittedBytes is not null)
+                        File.WriteAllBytes(cachePath, s_lastEmittedBytes);
+                }
+            }
+            catch
+            {
+                // Disk failure or stale cache — fall through to in-memory compile.
+                asm ??= CompileAssembly(fullSource);
+            }
+        }
+        else
+        {
+            asm = CompileAssembly(fullSource);
+        }
+
         if (asm == null) return;
 
         var genType = asm.GetType("ObjectRT.Generated.GeneratedModule");
@@ -250,6 +292,7 @@ public sealed class ReflectionJit : ExecutorBase
     // ── Roslyn ───────────────────────────────────────────────────
 
     private static int s_asmCounter;
+    private static byte[]? s_lastEmittedBytes;
 
     private static Assembly? CompileAssembly(string source)
     {
@@ -275,10 +318,12 @@ public sealed class ReflectionJit : ExecutorBase
         {
             var diag = string.Join("\n", result.Diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error));
             Console.Error.WriteLine($"[ReflectionJit] compilation failed:\n{diag}");
+            s_lastEmittedBytes = null;
             return null;
         }
-        ms.Position = 0;
-        return Assembly.Load(ms.ToArray());
+        var bytes = ms.ToArray();
+        s_lastEmittedBytes = bytes;
+        return Assembly.Load(bytes);
     }
 
     // ── Helpers ──────────────────────────────────────────────────
@@ -299,6 +344,33 @@ public sealed class ReflectionJit : ExecutorBase
         var sb = new StringBuilder();
         foreach (char c in name) sb.Append(char.IsLetterOrDigit(c) || c == '_' ? c : '_');
         return sb.Length > 0 ? sb.ToString() : "module";
+    }
+
+    /// <summary>
+    /// Compute a stable hash of the module's compilable content. Covers
+    /// every function's raw bytecode, the string table, and the static field
+    /// count. Two modules with identical hash produce identical generated code.
+    /// </summary>
+    private string ComputeModuleHash()
+    {
+        using var sha = System.Security.Cryptography.SHA256.Create();
+        // Hash the string table (used for ldstr / call targets).
+        foreach (var s in Mod.Strings)
+        {
+            var buf = System.Text.Encoding.UTF8.GetBytes(s);
+            sha.TransformBlock(buf, 0, buf.Length, null, 0);
+        }
+        // Hash each compilable function's raw bytecode.
+        foreach (var func in Mod.Functions)
+        {
+            if (!IsCompilable(func)) continue;
+            sha.TransformBlock(func.Code, 0, func.Code.Length, null, 0);
+        }
+        // Include static field count (affects generated field accesses).
+        var count = BitConverter.GetBytes(StaticFields.Length);
+        sha.TransformBlock(count, 0, count.Length, null, 0);
+        sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+        return Convert.ToHexStringLower(sha.Hash!);
     }
 
     private static string CS(string s) => s.Replace("\\", "\\\\").Replace("\"", "\\\"");

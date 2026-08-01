@@ -1,7 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
-    <ProjectReference Include="..\ObjectRT.VM\ObjectRT.VM.csproj" />
+    <ProjectReference Include="..\ObjectRT.Runtime\ObjectRT.Runtime.csproj" />
   </ItemGroup>
 
   <PropertyGroup>
@@ -9,6 +9,7 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <AssemblyName>objectrt</AssemblyName>
   </PropertyGroup>
 
 </Project>
