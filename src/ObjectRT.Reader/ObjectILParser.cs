@@ -301,10 +301,10 @@ public class ObjectILParser
             {
                 var pname = ExpectIdentifier();
                 Expect(TokenKind.Colon);
-                var ptype = ExpectIdentifier();
+                var ptype = ReadTypeName();
                 method.Params.Add(new ParameterRecord(
                     mod.StringPool.Add(pname.Text),
-                    mod.StringPool.Add(ptype.Text)));
+                    mod.StringPool.Add(ptype)));
                 TryMatch(TokenKind.Comma);
             }
             Expect(TokenKind.CloseParen);
@@ -323,9 +323,42 @@ public class ObjectILParser
         _tokenizer.AdvanceToken();
         var name = ExpectIdentifier();
         Expect(TokenKind.Colon);
-        var typeName = ExpectIdentifier();
-        type.Fields.Add(new FieldRecord(mod.StringPool.Add(name.Text), mod.StringPool.Add(typeName.Text)));
+        var typeName = ReadTypeName();
+        type.Fields.Add(new FieldRecord(mod.StringPool.Add(name.Text), mod.StringPool.Add(typeName)));
         type.FieldCount++;
+    }
+
+    /// <summary>
+    /// Reads a type name: an identifier optionally followed by [] array suffixes
+    /// (e.g. "int", "int[]", "string[][]"). Function types are not supported yet.
+    /// </summary>
+    private string ReadTypeName()
+    {
+        var name = ExpectIdentifier().Text;
+        while (_tokenizer.PeekToken().Kind == TokenKind.OpenBracket)
+        {
+            _tokenizer.AdvanceToken();
+            Expect(TokenKind.CloseBracket);
+            name += "[]";
+        }
+        return name;
+    }
+
+    /// <summary>
+    /// Records the current `#line` source info for the upcoming bytecode,
+    /// collapsing consecutive instructions that share the same source location.
+    /// </summary>
+    private void RecordSourceLine(MethodRecord method, List<byte> code)
+    {
+        int line = _tokenizer.SourceLine;
+        int col = _tokenizer.SourceColumn;
+        if (method.LineMappings.Count > 0)
+        {
+            var last = method.LineMappings[^1];
+            if (last.Line == line && last.Column == col)
+                return;
+        }
+        method.LineMappings.Add(new SourceMapEntry((uint)code.Count, line, col, _tokenizer.SourceText));
     }
 
     private void ParseMethod(ORBTModule mod, TypeRecord type)
@@ -340,10 +373,10 @@ public class ObjectILParser
         {
             var pname = ExpectIdentifier();
             Expect(TokenKind.Colon);
-            var ptype = ExpectIdentifier();
+            var ptype = ReadTypeName();
             method.Params.Add(new ParameterRecord(
                 mod.StringPool.Add(pname.Text),
-                mod.StringPool.Add(ptype.Text)));
+                mod.StringPool.Add(ptype)));
             TryMatch(TokenKind.Comma);
         }
         Expect(TokenKind.CloseParen);
@@ -396,8 +429,8 @@ public class ObjectILParser
             _tokenizer.AdvanceToken();
             var lname = ExpectIdentifier();
             Expect(TokenKind.Colon);
-            var ltype = ExpectIdentifier();
-            method.Locals.Add(new LocalRecord(mod.StringPool.Add(lname.Text), mod.StringPool.Add(ltype.Text)));
+            var ltype = ReadTypeName();
+            method.Locals.Add(new LocalRecord(mod.StringPool.Add(lname.Text), mod.StringPool.Add(ltype)));
             method.LocalCount++;
         }
 
@@ -413,6 +446,11 @@ public class ObjectILParser
     private void ParseStatement(ORBTModule mod, MethodRecord method, List<byte> code)
     {
         if (_tokenizer.PeekToken().Kind is TokenKind.Eof or TokenKind.CloseBrace) return;
+
+        // Record the source mapping before emitting this statement's bytes.
+        // PeekToken() above has already skipped any pending `// #line` comment,
+        // so the tokenizer's SourceLine/SourceColumn/SourceText are current.
+        RecordSourceLine(method, code);
 
         var next = _tokenizer.PeekToken();
 
@@ -601,10 +639,30 @@ public class ObjectILParser
             && _tokenizer.PeekToken().Line == mnLine)
         {
             var operand = _tokenizer.AdvanceToken();
+            // Field references are qualified as "Type::field" in the text IR —
+            // join the three tokens so the operand is the full field reference.
+            // ModuleCompiler keys fields as "Type.field" (dot), so normalize.
+            if (opcode is 0x0F or 0x2A or 0x10 or 0x11 // ldfld, stfld, ldsfld, stsfld
+                && _tokenizer.PeekToken().Kind == TokenKind.DoubleColon
+                && _tokenizer.PeekToken().Line == mnLine)
+            {
+                _tokenizer.AdvanceToken(); // ::
+                var fieldTok = _tokenizer.AdvanceToken();
+                operand = new Token(TokenKind.Identifier, operand.Text + "." + fieldTok.Text, operand.Line, operand.Col);
+            }
             operandRead = EncodeOperand(mod, code, opcode, operand);
             if (!operandRead)
             {
                 while (_tokenizer.PeekToken().Kind != TokenKind.Eof && _tokenizer.PeekToken().Line == mnLine)
+                    _tokenizer.AdvanceToken();
+            }
+            else if (opcode == 0x12)
+            {
+                // newobj: consume the trailing ".constructor(...)" suffix so it
+                // doesn't leak into the next statement.
+                while (_tokenizer.PeekToken().Kind != TokenKind.Eof
+                       && _tokenizer.PeekToken().Kind != TokenKind.CloseBrace
+                       && _tokenizer.PeekToken().Line == mnLine)
                     _tokenizer.AdvanceToken();
             }
         }
@@ -649,7 +707,6 @@ public class ObjectILParser
             case 0x03: case 0x04: // ldarg, starg
             case 0x05: case 0x06: // ldloc, stloc
             case 0x02:            // ldstr
-            case 0x12: case 0x13: // newobj, newarr
             case 0x1F: case 0x20: case 0x21: // conv, castclass, isinst
             case 0x0F: case 0x2A: // ldfld, stfld
             case 0x10: case 0x11: // ldsfld, stsfld
@@ -660,6 +717,19 @@ public class ObjectILParser
                 else
                     idx = mod.StringPool.Add(operand.Text);
                 EmitU16(code, idx);
+                return true;
+            }
+            case 0x12: case 0x13: // newobj, newarr
+            {
+                // Dotted identifiers include the ctor suffix: "Delegate.constructor".
+                // Strip it so the type resolves ("Delegate").
+                string name = operand.Text;
+                if (opcode == 0x12)
+                {
+                    int ci = name.IndexOf(".constructor", StringComparison.Ordinal);
+                    if (ci >= 0) name = name[..ci];
+                }
+                EmitU16(code, mod.StringPool.Add(name));
                 return true;
             }
             case 0x32: case 0x33: case 0x34: // br, brtrue, brfalse

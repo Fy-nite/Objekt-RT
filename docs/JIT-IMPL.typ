@@ -4,7 +4,7 @@
 #show: xyznote.with(
   title: "ObjectRT ReflectionJit — Implementation Notes",
   author: "charlie santana - Finite",
-  abstract: "Bytecode → C# source → Roslyn → delegates. Disk cache and source emit.",
+  abstract: "Bytecode → C\# source → Roslyn → delegates. Disk cache and source emit.",
   createtime: "2026-07-31",
   lang: "au",
 )
@@ -16,7 +16,7 @@
 ```
 CompiledFunction.Code (bytes)
   → IsCompilable() check (scan for unsupported opcodes)
-  → GenerateMethod() → C# source (StringBuilder)
+  → GenerateMethod() → C\# source (StringBuilder)
   → CompileAssembly() → Roslyn CSharpCompilation (Release) → Assembly.Load
   → Delegate.CreateDelegate → Func<IExecutor,Value[],Value>
   → _compiled[funcIdx]
@@ -25,7 +25,7 @@ CompiledFunction.Code (bytes)
 = Supported opcodes (v1)
 
 All loads, stores, arithmetic, comparisons, branches, returns, static field
-access, and native calls are compiled to C#. The following opcodes are
+access, and native calls are compiled to C\#. The following opcodes are
 #strong[not supported] — functions containing them fall back to the interpreter:
 
 `ldfld` / `stfld`, `newobj` / `newarr`, `ldelem` / `stelem`,
@@ -35,9 +35,9 @@ access, and native calls are compiled to C#. The following opcodes are
 The `IsCompilable()` method scans each function's bytecode before compilation.
 If any unsupported opcode appears, the entire function stays interpreted.
 
-= C# generation
+= C\# generation
 
-Each bytecode instruction becomes one line of C#:
+Each bytecode instruction becomes one line of C\#:
 
 #strong[Loads]:
 ```csharp
@@ -104,10 +104,10 @@ best-effort: IO failure falls through to in-memory compilation without error.
 
 = Source emit
 
-Set `Runtime.EmitDir` to dump the generated C# source to disk as
+Set `Runtime.EmitDir` to dump the generated C\# source to disk as
 `{ModuleName}.ObjectRT.g.cs`. Useful for debugging code-gen output or
-abusing the JIT as an ObjectIL → C# compiler (take the emitted source,
-drop it in a regular C# project with an `ObjectRT.VM` reference).
+abusing the JIT as an ObjectIL → C\# compiler (take the emitted source,
+drop it in a regular C\# project with an `ObjectRT.VM` reference).
 
 = Multi-threading notes
 

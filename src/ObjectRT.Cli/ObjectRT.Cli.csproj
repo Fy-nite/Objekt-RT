@@ -10,6 +10,18 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AssemblyName>objectrt</AssemblyName>
+
+    <!-- Dotnet tool packaging -->
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>objectrt</ToolCommandName>
+    <PackageOutputPath>./nupkg</PackageOutputPath>
+    <Version>1.0.0-dev</Version>
+    <Description>ObjectRT CLI — load, compile, and run ObjectIL modules.
+Supports interpreter mode, Roslyn JIT, @DllImport native bindings,
+and pre-compilation of .oil source to .orbt binary.</Description>
+    <Authors>Finite</Authors>
+    <PackageTags>objectrt;objectil;vm;interpreter;jit;scripting</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
   </PropertyGroup>
 
 </Project>

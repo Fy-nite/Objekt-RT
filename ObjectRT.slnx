@@ -13,6 +13,7 @@
     <Project Path="examples/NesDemo/ObjectRT.NesDemo.csproj" />
   </Folder>
   <Folder Name="/src/">
+    <Project Path="examples/NesEmulator/NesEmulator.csproj" />
     <Project Path="src/ObjectRT.Abstractions/ObjectRT.Abstractions.csproj" />
     <Project Path="src/ObjectRT.Cli/ObjectRT.Cli.csproj" />
     <Project Path="src/ObjectRT.Reader/ObjectRT.Reader.csproj" />
@@ -20,6 +21,7 @@
     <Project Path="src/ObjectRT.SourceGenerator/ObjectRT.SourceGenerator.csproj" />
     <Project Path="src/ObjectRT.VM/ObjectRT.VM.csproj" />
     <Project Path="src/ObjectRT.MonoGame/ObjectRT.MonoGame.csproj" />
-    <Project Path="src/NesEmulator/NesEmulator.csproj" />
   </Folder>
+  <Project Path="../ObjektRT.Core/ObjektRT.Core.csproj" />
+  <Project Path="../ObjektRT.Core/tests/ObjektRT.Core.Tests/ObjektRT.Core.Tests.csproj" />
 </Solution>

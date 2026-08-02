@@ -15,6 +15,7 @@ public enum TokenKind
     Dot,
     Comma,
     Colon,
+    DoubleColon, // ::
     Semicolon,
     Equals,      // =
     Arrow,       // ->
@@ -40,6 +41,13 @@ public class ObjectILTokenizer
     private int _col = 1;
     private Token? _lookahead;
     private bool _hasLookahead;
+
+    /// <summary>Logical source line from the most recent `// #line N` comment.</summary>
+    public int SourceLine { get; private set; } = 1;
+    /// <summary>Logical source column from the most recent `// #line N:C` comment.</summary>
+    public int SourceColumn { get; private set; } = 1;
+    /// <summary>Original source text carried by the most recent `// #line` comment.</summary>
+    public string? SourceText { get; private set; }
 
     private static readonly HashSet<string> Keywords = new()
     {
@@ -104,14 +112,56 @@ public class ObjectILTokenizer
             if (c == '/' && _pos + 1 < _input.Length && _input[_pos + 1] == '/')
             {
                 Advance(); Advance(); // skip //
+                var commentStart = _pos;
                 while (_pos < _input.Length)
                 {
                     if (Peek() == '\n') break;
                     Advance();
                 }
+                var comment = _input[commentStart.._pos].Trim();
+                if (comment.StartsWith("#line", StringComparison.Ordinal))
+                    ParseLineDirective(comment);
                 continue;
             }
             break;
+        }
+    }
+
+    /// <summary>
+    /// Parses a `// #line N` or `// #line N:C "source text"` directive and
+    /// updates <see cref="SourceLine"/>/<see cref="SourceColumn"/>/
+    /// <see cref="SourceText"/> so the parser can map bytecode offsets back to
+    /// the original Contract source for error reporting.
+    /// </summary>
+    private void ParseLineDirective(string comment)
+    {
+        // "#line 12" or "#line 12:5" or "#line 12:5 \"source\""
+        var rest = comment["#line".Length..].Trim();
+        int lineEnd = 0;
+        while (lineEnd < rest.Length && char.IsDigit(rest[lineEnd])) lineEnd++;
+        if (lineEnd == 0) return;
+        if (int.TryParse(rest.AsSpan(0, lineEnd), out var newLine))
+            SourceLine = newLine;
+
+        // Optional :column
+        if (lineEnd < rest.Length && rest[lineEnd] == ':')
+        {
+            int colStart = lineEnd + 1;
+            int colEnd = colStart;
+            while (colEnd < rest.Length && char.IsDigit(rest[colEnd])) colEnd++;
+            if (int.TryParse(rest.AsSpan(colStart, colEnd - colStart), out var newCol))
+                SourceColumn = newCol;
+            lineEnd = colEnd;
+        }
+
+        // Optional "source text"
+        SourceText = null;
+        int textStart = rest.IndexOf('"', lineEnd);
+        if (textStart >= 0 && textStart + 1 < rest.Length)
+        {
+            int textEnd = rest.IndexOf('"', textStart + 1);
+            if (textEnd > textStart)
+                SourceText = rest[(textStart + 1)..textEnd];
         }
     }
 
@@ -203,6 +253,13 @@ public class ObjectILTokenizer
         {
             Advance(); Advance();
             return new Token(TokenKind.Arrow, "->", tokLine, tokCol);
+        }
+
+        // :: double colon (qualified field/member references like Delegate::target)
+        if (c == ':' && _pos + 1 < _input.Length && _input[_pos + 1] == ':')
+        {
+            Advance(); Advance();
+            return new Token(TokenKind.DoubleColon, "::", tokLine, tokCol);
         }
 
         // @Annotation — only consumed when followed by an identifier start.

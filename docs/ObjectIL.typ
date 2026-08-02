@@ -314,8 +314,8 @@ The following feature paths are defined in ObjectIL v1:
     [`Memory.Managed`],     [Runtime-managed memory with garbage collection.],
     [`Memory.Unmanaged`],   [Manual memory allocation and deallocation.],
     [`Reflection.None`],    [No reflection capabilities; type metadata is absent at runtime.],
-    [`Reflection.Basic`],   [Type inspection: enumerate fields, methods, and their signatures at runtime.],
-    [`Reflection.Full`],    [Type inspection + dynamic dispatch and member invocation by name.],
+    [`Reflection.Basic`],   [Type inspection: `ldtype` type objects, enumerate fields, methods, and their signatures at runtime.],
+    [`Reflection.Full`],    [Type inspection + dynamic dispatch and member invocation by name (e.g. `Class.Invoke`).],
     [`JIT.Optimizing`],     [JIT compilation with optimisation passes beyond naive translation.],
     [`SIMD.Vector128`],     [128-bit SIMD operations (SSE, NEON equivalents).],
     [`SIMD.Vector256`],     [256-bit SIMD operations (AVX equivalents).],
@@ -412,7 +412,7 @@ A conforming runtime should:
 The `@NativeBinding("BindingName")` annotation marks a class as a host
 binding — a logical namespace through which ObjectIL scripts access
 methods on host-registered objects. This is the IR-level equivalent of
-`[IRHostBinding]` in the C# bindings API.
+`[IRHostBinding]` in the C\# bindings API.
 
 ```oil
 @NativeBinding("MonoGame.Screen")
@@ -670,6 +670,7 @@ Reference).
     align: (left, left, left),
     table.header([#strong[Instruction]], [#strong[Operand]], [#strong[Description]]),
     table.hline(),
+    [`ldc`], [`<integer>`], [Push 32-bit integer constant (alias for `ldc.i4`).],
     [`ldc.i4`], [`<integer>`], [Push 32-bit integer constant.],
     [`ldc.i8`], [`<integer>`], [Push 64-bit integer constant.],
     [`ldc.r4`], [`<number>`], [Push 32-bit float constant.],
@@ -783,10 +784,16 @@ Reference).
     [`conv`], [`<type>`], [Pop value, convert to target type, push.],
     [`castclass`], [`<type>`], [Assert top-of-stack is given type name.],
     [`isinst`], [`<type>`], [Pop value, push true if type matches.],
+    [`ldtype`], [`<type>`], [Push the type object for the named type.],
   )],
   kind: table,
   caption: [Type conversion and testing instructions],
 )
+
+`ldtype` produces the *type object* for the named type — the class as a
+first-class value. Type objects are singletons and instances of the
+built-in `Class` class; see the ObjectRT V1 specification, §Type Objects
+and Reflection (Runtime Extensions).
 
 == Object and Array Operations
 
@@ -815,6 +822,7 @@ Reference).
     table.hline(),
     [`call`], [`<method-ref>`], [Call static or instance method.],
     [`callvirt`], [`<method-ref>`], [Virtual call — dispatch by receiver type.],
+    [`callnative`], [`<method-ref>`], [Native call — resolve against the native handler only, bypassing script functions.],
     [`ret`], [—], [Return from current frame.],
   )],
   kind: table,

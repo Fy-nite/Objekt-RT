@@ -3,22 +3,25 @@ using ObjectRT.Abstractions;
 namespace ObjectRT.VM;
 
 /// <summary>
-/// Shared state between all executor implementations: heap, static fields,
-/// string table, value marshaling, and the native call hook.
+/// Base for all executor implementations: owns a reference to the shared
+/// <see cref="ExecutorState"/> (heap, statics, strings) and the native call
+/// hook. Each executor has its own call stack; the state is shared so object
+/// handles are valid across threads.
 /// </summary>
 public abstract class ExecutorBase : IExecutor
 {
     protected readonly CompiledModule Mod;
 
+    /// <summary>The shared module state (heap, statics, string table).</summary>
+    public ExecutorState State { get; }
+
+    // Compatibility aliases over State — existing interpreter/JIT code uses
+    // Heap/StaticFields/InternString/GetStringValue directly.
     /// <summary>Heap — each object is a byte buffer sized by the type's instance_size.</summary>
-    public readonly List<byte[]> Heap = new();
+    public List<byte[]> Heap => State.Heap;
 
     /// <summary>Static field storage.</summary>
-    public readonly Value[] StaticFields;
-
-    // Interned string table (handles — the Value struct can't hold CLR refs).
-    private readonly Dictionary<string, uint> _stringMap = new(StringComparer.Ordinal);
-    private readonly List<string?> _strings = new();
+    public Value[] StaticFields => State.StaticFields;
 
     private Func<string, object?[], object?>? _nativeCall;
 
@@ -28,11 +31,12 @@ public abstract class ExecutorBase : IExecutor
         set => _nativeCall = value;
     }
 
-    protected ExecutorBase(CompiledModule mod)
+    protected ExecutorBase(CompiledModule mod) : this(mod, null) { }
+
+    protected ExecutorBase(CompiledModule mod, ExecutorState? shared)
     {
         Mod = mod;
-        StaticFields = new Value[mod.Fields.Count];
-        Array.Fill(StaticFields, Value.Nil());
+        State = shared ?? new ExecutorState(mod);
     }
 
     // ── IExecutor ──────────────────────────────────────────────────
@@ -49,17 +53,9 @@ public abstract class ExecutorBase : IExecutor
 
     // ── String table ───────────────────────────────────────────────
 
-    public uint InternString(string s)
-    {
-        if (_stringMap.TryGetValue(s, out var idx)) return idx;
-        idx = (uint)_strings.Count;
-        _strings.Add(s);
-        _stringMap[s] = idx;
-        return idx;
-    }
+    public uint InternString(string s) => State.InternString(s);
 
-    public string? GetStringValue(uint idx)
-        => idx < _strings.Count ? _strings[(int)idx] : null;
+    public string? GetStringValue(uint idx) => State.GetStringValue(idx);
 
     // ── Value marshaling ───────────────────────────────────────────
 
@@ -67,12 +63,18 @@ public abstract class ExecutorBase : IExecutor
     {
         null => Value.Nil(),
         string s => Value.FromStr(InternString(s)),
-        _ => Value.FromObject(val),
+        int i => Value.FromI4(i),
+        bool b => Value.FromI4(b ? 1 : 0),
+        long l => Value.FromI8(l),
+        float f => Value.FromR4(f),
+        double d => Value.FromR8(d),
+        _ => Value.FromObj(State.InternExternal(val)),
     };
 
     public object? ValueToObject(Value v) => v.Tag switch
     {
         ValueTag.Str => GetStringValue(v.AsStr()),
+        ValueTag.Obj => ExecutorState.IsExternal(v.AsObj()) ? State.GetExternal(v.AsObj()) : v.AsObj(),
         _ => Value.ToObject(v),
     };
 

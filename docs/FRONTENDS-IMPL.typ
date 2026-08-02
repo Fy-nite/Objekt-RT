@@ -53,7 +53,7 @@ and referenced by name in script `ldstr` / `call` chains.
 == Demo (`examples/MonoGameDemo/`)
 
 A bouncing ball driven entirely by `game.oil` through `call` opcodes into the
-MonoGame bindings. The C# side only owns the window and game loop; the script
+MonoGame bindings. The C\# side only owns the window and game loop; the script
 handles all physics, rendering, and input.
 
 = NES emulator
@@ -73,11 +73,11 @@ development.
     [`Cartridge.cs`], [iNES loader, `Mirroring` enum, `Mapper` base class.],
     [`Mapper0.cs`], [NROM — no bank switching.],
     [`Mapper1.cs`], [MMC1 — serial shift register; PRG/CHR banking + mirroring control.],
-    [`Mapper2.cs`], [UxROM — 16KB PRG bank switch; last bank fixed at $C000.],
-    [`Mapper4.cs`], [MMC3 — 8KB PRG / 1–2KB CHR banking; scanline IRQ counter; PRG-RAM at $6000.],
+    [`Mapper2.cs`], [UxROM — 16KB PRG bank switch; last bank fixed at `$C000`.],
+    [`Mapper4.cs`], [MMC3 — 8KB PRG / 1–2KB CHR banking; scanline IRQ counter; PRG-RAM at `$6000`.],
     [`Cpu.cs`], [Full official opcodes + common unofficial (LAX/SAX/DCP/ISB/SLO/RLA/SRE/RRA, ANC/ALR/ARR/SBX). Table-driven cycles with page-cross and branch penalties. NMI/IRQ/BRK with correct flag semantics.],
-    [`Ppu.cs`], [Pattern tables, nametables (horizontal/vertical/four-screen mirroring), palette RAM ($3F10 ↔ $3F00 mirror), OAM DMA, 8×8/8×16 sprites with flip/priority. Per-scanline sprite overflow (bit 5) and sprite‑0 hit (bit 6) evaluation.],
-    [`Bus.cs`], [CPU address decoding: $0000–RAM, $2000–PPU, $4014–DMA, $4016/$4017–controllers, $4020+–cartridge. Controller strobe latching.],
+    [`Ppu.cs`], [Pattern tables, nametables (horizontal/vertical/four-screen mirroring), palette RAM (`$3F10` ↔ `$3F00` mirror), OAM DMA, 8×8/8×16 sprites with flip/priority. Per-scanline sprite overflow (bit 5) and sprite‑0 hit (bit 6) evaluation.],
+    [`Bus.cs`], [CPU address decoding: `$0000`–RAM, `$2000`–PPU, `$4014`–DMA, `$4016`/`$4017`–controllers, `$4020`+–cartridge. Controller strobe latching.],
     [`Controller.cs`], [Standard NES controller: strobe latches button states, reads shift out LSB‑first.],
     [`Nes.cs`], [Top-level: `Load` / `Reset` / `StepFrame` (~29 781 cycles) / `RunFrames`. `IrqCallback` on cartridge for MMC3 scanline IRQ.],
     [`TestRom.cs`], [Hand-assembled iNES ROM (mapper 0): boots, loads palette, fills nametable → perfect checkerboard. No copyrighted content.],
@@ -89,7 +89,7 @@ development.
 
 == Frontend (`examples/NesDemo/`)
 
-The game loop is pure C# (no ObjectIL dispatch overhead):
+The game loop is pure C\# (no ObjectIL dispatch overhead):
 
 ```csharp
 _nes.ReadInput();   // maps keyboard → controller
@@ -110,7 +110,7 @@ returned one byte past the correct address. The test ROM (straight‑line code
 with no subroutines) passed; every real game was broken.
 
 #strong[Nametable mirroring]: The horizontal mirroring formula collapsed every
-$2000–$27FF address onto physical $2000 (`nt & 0x0800` after masking to 0x0FFF).
+`$2000`–`$27FF` address onto physical `$2000` (`nt & 0x0800` after masking to 0x0FFF).
 Fixed to keep the intra‑table offset: `0x2000 + ((addr & 0x0800) != 0 ? 0x800 : 0) + (addr & 0x3FF)`.
 
 #strong[Sprite‑0 hit]: SMB1 polls `$2002` bit 6 in a spin loop to detect a
@@ -118,7 +118,7 @@ specific scanline for its status‑bar split. The PPU now evaluates sprite‑0
 overlap with non‑transparent background pixels during frame rendering.
 Reading `$2002` clears bits 5–7 (matching real hardware).
 
-#strong[Palette $3F10 mirror]: mirrors `$3F00` only, not the full 0x10 block.
+#strong[Palette `$3F10` mirror]: mirrors `$3F00` only, not the full 0x10 block.
 Full‑block mirroring breaks sprite palettes in many games.
 
 == Known limits

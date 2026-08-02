@@ -81,6 +81,9 @@ public class ORBTReader
             for (ushort j = 0; j < type.MethodCount; j++)
                 type.Methods.Add(ReadMethodRecord(mod.StringPool));
 
+            // Type-level attributes (v1 extension)
+            type.Attributes = ReadAttributeList(mod.StringPool);
+
             mod.Types.Add(type);
         }
     }
@@ -129,6 +132,9 @@ public class ORBTReader
         method.LabelCount = _stream.ReadU16();
         for (ushort j = 0; j < method.LabelCount; j++)
             method.Labels.Add(ReadLabelRecord());
+
+        // Method-level attributes (v1 extension)
+        method.Attributes = ReadAttributeList(pool);
 
         // Instructions
         method.InstrCount = _stream.ReadU32();
@@ -342,6 +348,22 @@ public class ORBTReader
         }
     }
 
+    private List<AttributeRecord> ReadAttributeList(StringPool pool)
+    {
+        ushort count = _stream.ReadU16();
+        var attrs = new List<AttributeRecord>(count);
+        for (ushort i = 0; i < count; i++)
+        {
+            ushort nameIdx = _stream.ReadU16();
+            ushort argCount = _stream.ReadU16();
+            var args = new List<ushort>(argCount);
+            for (ushort j = 0; j < argCount; j++)
+                args.Add(_stream.ReadU16());
+            attrs.Add(new AttributeRecord(nameIdx, args));
+        }
+        return attrs;
+    }
+
     private void ReadMethodBodies(ORBTModule mod)
     {
         // Method bodies are read inline as part of type/method records.
@@ -355,6 +377,14 @@ public static class OrbtFileReader
     public static ORBTModule ReadFile(string path)
     {
         var stream = new BinaryStream(path);
+        var reader = new ORBTReader(stream);
+        return reader.ReadModule();
+    }
+
+    /// <summary>Read an ORBT module from an in-memory byte array.</summary>
+    public static ORBTModule ReadBytes(byte[] data)
+    {
+        var stream = new BinaryStream(data);
         var reader = new ORBTReader(stream);
         return reader.ReadModule();
     }

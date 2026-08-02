@@ -23,9 +23,11 @@ public sealed class Interpreter : ExecutorBase
     private readonly List<Frame> _frames = new(256);
     private Value[] _localsScratch = Array.Empty<Value>();
     private string _currentFuncName = "";
+    private uint _currentPc;
     private bool _trace;
 
     public Interpreter(CompiledModule mod) : base(mod) { }
+    public Interpreter(CompiledModule mod, ExecutorState? shared) : base(mod, shared) { }
 
     public bool Trace { get => _trace; set => _trace = value; }
 
@@ -74,7 +76,10 @@ public sealed class Interpreter : ExecutorBase
 
             while (pc < codeSize)
             {
+                _currentPc = pc; // instruction start — used for error reporting
                 ushort op = ReadOpcode(code, ref pc);
+                if (_trace || Environment.GetEnvironmentVariable("ORTRT_TRACE") == "1")
+                    Console.Error.WriteLine($"; {_currentFuncName} pc={pc - 1} op=0x{op:X2} stack={_stack.Count}");
 
                 switch ((Opcode)op)
                 {
@@ -92,8 +97,22 @@ public sealed class Interpreter : ExecutorBase
                     case Opcode.Add: { var b = Pop(); var a = Pop(); Push(Arith(a, b, (x, y) => x + y, (x, y) => x + y, (x, y) => x + y, (x, y) => x + y)); break; }
                     case Opcode.Sub: { var b = Pop(); var a = Pop(); Push(Arith(a, b, (x, y) => x - y, (x, y) => x - y, (x, y) => x - y, (x, y) => x - y)); break; }
                     case Opcode.Mul: { var b = Pop(); var a = Pop(); Push(Arith(a, b, (x, y) => x * y, (x, y) => x * y, (x, y) => x * y, (x, y) => x * y)); break; }
-                    case Opcode.Div: { var b = Pop(); var a = Pop(); Push(Arith(a, b, (x, y) => y != 0 ? x / y : 0, (x, y) => x / y, (x, y) => x / y, (x, y) => x / y)); break; }
-                    case Opcode.Rem: { var b = Pop(); var a = Pop(); Push(Arith(a, b, (x, y) => y != 0 ? x % y : 0, (x, y) => x % y, (x, y) => x % y, (x, y) => x % y)); break; }
+                    case Opcode.Div:
+                    {
+                        var b = Pop(); var a = Pop();
+                        if ((a.Tag == ValueTag.I4 || a.Tag == ValueTag.I8) && IsZero(b))
+                            return Err(VmErrorKind.DivisionByZero, "division by zero");
+                        Push(Arith(a, b, (x, y) => x / y, (x, y) => x / y, (x, y) => x / y, (x, y) => x / y));
+                        break;
+                    }
+                    case Opcode.Rem:
+                    {
+                        var b = Pop(); var a = Pop();
+                        if ((a.Tag == ValueTag.I4 || a.Tag == ValueTag.I8) && IsZero(b))
+                            return Err(VmErrorKind.DivisionByZero, "remainder by zero");
+                        Push(Arith(a, b, (x, y) => x % y, (x, y) => x % y, (x, y) => x % y, (x, y) => x % y));
+                        break;
+                    }
                     case Opcode.Neg: { Push(Negate(Pop())); break; }
 
                     case Opcode.And: { int b = Pop().I4, a = Pop().I4; Push(Value.FromI4(a & b)); break; }
@@ -148,6 +167,42 @@ public sealed class Interpreter : ExecutorBase
                         ushort si = ReadU16(code, ref pc);
                         ushort argc = ReadU16(code, ref pc);
                         string name = Mod.GetString(si);
+
+                        // Delegate dispatch: `callvirt Delegate.Invoke` pops a
+                        // receiver (a Delegate object) plus argc args, reads the
+                        // target method name from its 'target' field and the
+                        // captured environment from its 'closure' field, then
+                        // calls that module function with the args. Capturing
+                        // lambdas take the closure object as their first param,
+                        // so it is prepended to the argument list. The compiler
+                        // pushes args first, then the receiver.
+                        if (op == (ushort)Opcode.Callvirt && name == "Delegate.Invoke")
+                        {
+                            var recv = Pop();
+                            if (recv.Tag != ValueTag.Obj)
+                                return Err(VmErrorKind.NotAnObject, "callvirt Delegate.Invoke on non-object");
+
+                            var popped = new Value[argc];
+                            for (int ai = argc - 1; ai >= 0; ai--) popped[ai] = Pop();
+                            var (targetName, closureVal, hasClosure) = ReadDelegate(Mod, State, recv.AsObj());
+                            if (targetName == null)
+                                return Err(VmErrorKind.InvalidObjectHandle, "delegate handle invalid");
+
+                            if (!Mod.FunctionMap.TryGetValue(targetName, out var tfi))
+                                return Err(VmErrorKind.UnresolvedMethod, $"delegate target '{targetName}' not found");
+                            var tcallee = Mod.GetFunction(tfi);
+                            int totalArgs = argc + (hasClosure ? 1 : 0);
+                            if (tcallee.NumParams != totalArgs)
+                                return Err(VmErrorKind.TypeMismatch, $"delegate target '{targetName}' expects {tcallee.NumParams} args, got {totalArgs}");
+                            var dargs = new Value[totalArgs];
+                            if (hasClosure) dargs[0] = closureVal;
+                            for (int ai = argc - 1; ai >= 0; ai--) dargs[ai + (hasClosure ? 1 : 0)] = popped[ai];
+                            var tlocals = new Value[tcallee.NumParams + tcallee.NumLocals + 1];
+                            Array.Fill(tlocals, Value.Nil());
+                            for (int ai = (int)tcallee.NumParams - 1; ai >= 0; ai--) tlocals[ai] = dargs[ai];
+                            _frames.Add(new Frame { Func = tcallee, Pc = 0, StackBase = (uint)_stack.Count, Locals = tlocals, RetFunc = frame.Func.SelfIndex, RetPc = pc });
+                            goto nextFrame;
+                        }
 
                         if (op != (ushort)Opcode.NativeCall && Mod.FunctionMap.TryGetValue(name, out var cfi))
                         {
@@ -214,10 +269,80 @@ public sealed class Interpreter : ExecutorBase
         return Value.Nil();
     }
 
+    // ── Delegate dispatch (shared by the interpreter case and threads) ──
+
+    /// <summary>
+    /// Reads a delegate value's target method name and closure object from the
+    /// shared heap. Returns (null, _, _) when the handle is not a valid Delegate.
+    /// </summary>
+    public static (string? Target, Value Closure, bool HasClosure) ReadDelegate(CompiledModule mod, ExecutorState state, uint handle)
+    {
+        if (handle >= state.Heap.Count)
+            return (null, default, false);
+
+        // Fields are laid out contiguously per type: FieldOffset is the first
+        // global field index. Delegate declares [target, closure].
+        int delegateTypeIdx = -1;
+        for (int ti = 0; ti < mod.Types.Count; ti++)
+        {
+            if (mod.Types[ti].DebugName == "Delegate") { delegateTypeIdx = ti; break; }
+        }
+        if (delegateTypeIdx < 0)
+            return (null, default, false);
+        var dt = mod.Types[delegateTypeIdx];
+        if (dt.FieldCount < 2 || dt.FieldOffset + 2 > (uint)mod.Fields.Count)
+            return (null, default, false);
+        var targetField = mod.Fields[(int)dt.FieldOffset];      // target
+        var closureField = mod.Fields[(int)dt.FieldOffset + 1]; // closure
+
+        if (targetField.Offset + 16 > (uint)state.Heap[(int)handle].Length)
+            return (null, default, false);
+        var targetVal = MemoryMarshal.Read<Value>(state.Heap[(int)handle].AsSpan((int)targetField.Offset, 16));
+        if (targetVal.Tag != ValueTag.Str)
+            return (null, default, false);
+        string target = state.GetStringValue(targetVal.AsStr()) ?? "";
+
+        bool hasClosure = false;
+        Value closure = Value.Nil();
+        if (closureField.Offset + 16 <= (uint)state.Heap[(int)handle].Length)
+        {
+            closure = MemoryMarshal.Read<Value>(state.Heap[(int)handle].AsSpan((int)closureField.Offset, 16));
+            hasClosure = closure.Tag == ValueTag.Obj;
+        }
+        return (target, closure, hasClosure);
+    }
+
+    /// <summary>
+    /// Runs a delegate value's target function on this executor (used as a
+    /// thread entry point). Resolves the target/closure from the shared heap,
+    /// prepends the closure when present, and runs the module function.
+    /// </summary>
+    public Result<Value> RunDelegate(uint handle, Value[] args)
+    {
+        var (targetName, closureVal, hasClosure) = ReadDelegate(Mod, State, handle);
+        if (targetName == null)
+            return new VmError(VmErrorKind.InvalidObjectHandle, "delegate handle invalid");
+        if (!Mod.FunctionMap.TryGetValue(targetName, out var tfi))
+            return new VmError(VmErrorKind.UnresolvedMethod, $"delegate target '{targetName}' not found");
+        var callee = Mod.GetFunction(tfi);
+        int totalArgs = args.Length + (hasClosure ? 1 : 0);
+        if (callee.NumParams != totalArgs)
+            return new VmError(VmErrorKind.TypeMismatch, $"delegate target '{targetName}' expects {callee.NumParams} args, got {totalArgs}");
+        var dargs = new Value[totalArgs];
+        if (hasClosure) dargs[0] = closureVal;
+        for (int i = 0; i < args.Length; i++) dargs[i + (hasClosure ? 1 : 0)] = args[i];
+        return RunFunction(tfi, dargs);
+    }
+
     // ── Stack ops ──────────────────────────────────────────────────
 
     private void Push(Value v) => _stack.Add(v);
-    private Value Pop() { var v = _stack[^1]; _stack.RemoveAt(_stack.Count - 1); return v; }
+    private Value Pop()
+    {
+        if (_stack.Count == 0)
+            throw new VmRuntimeException(BuildError(VmErrorKind.StackUnderflow, "stack underflow"));
+        var v = _stack[^1]; _stack.RemoveAt(_stack.Count - 1); return v;
+    }
     private Value Peek(int depth = 0) => _stack[^(1 + depth)];
 
     // ── Arithmetic helpers ─────────────────────────────────────────
@@ -240,6 +365,7 @@ public sealed class Interpreter : ExecutorBase
 
     public static Value Negate(Value v) => v.Tag switch { ValueTag.I4 => Value.FromI4(-v.I4), ValueTag.I8 => Value.FromI8(-v.I8), ValueTag.R4 => Value.FromR4(-v.R4), ValueTag.R8 => Value.FromR8(-v.R8), _ => Value.Nil() };
     public static double ToDouble(Value v) => v.Tag switch { ValueTag.I4 => v.I4, ValueTag.I8 => v.I8, ValueTag.R4 => v.R4, ValueTag.R8 => v.R8, _ => 0 };
+    public static bool IsZero(Value v) => v.Tag switch { ValueTag.I4 => v.I4 == 0, ValueTag.I8 => v.I8 == 0, ValueTag.R4 => v.R4 == 0f, ValueTag.R8 => v.R8 == 0d, _ => false };
     public static int NumericCompare(Value a, Value b) => (a.Tag == ValueTag.I4 && b.Tag == ValueTag.I4) ? a.I4.CompareTo(b.I4) : (a.Tag == ValueTag.I8 && b.Tag == ValueTag.I8) ? a.I8.CompareTo(b.I8) : ToDouble(a).CompareTo(ToDouble(b));
 
     // ── Bytecode read helpers ──────────────────────────────────────
@@ -252,5 +378,54 @@ public sealed class Interpreter : ExecutorBase
     internal static float ReadF32(byte[] code, ref uint pc) => BitConverter.Int32BitsToSingle(ReadI32(code, ref pc));
     internal static double ReadF64(byte[] code, ref uint pc) => BitConverter.Int64BitsToDouble(ReadI64(code, ref pc));
 
-    private VmError Err(VmErrorKind kind, string msg) => new(kind, msg, _currentFuncName);
+    private VmError Err(VmErrorKind kind, string msg) => BuildError(kind, msg);
+
+    /// <summary>
+    /// Builds a rich <see cref="VmError"/> from the current execution state:
+    /// the failing IR instruction (opcode + pc), the original-source mapping
+    /// (from `#line` metadata), and the call stack.
+    /// </summary>
+    private VmError BuildError(VmErrorKind kind, string msg)
+    {
+        var err = new VmError(kind, msg, _currentFuncName);
+
+        // The failing IR instruction + original-source mapping.
+        if (_frames.Count > 0)
+        {
+            var frame = _frames[^1];
+            var code = frame.Func.Code;
+            if (_currentPc < code.Length)
+            {
+                var p = _currentPc;
+                err.Opcode = OpcodeExtensions.ToDisplayString((Opcode)ReadOpcode(code, ref p));
+                err.Pc = _currentPc;
+            }
+
+            var map = frame.Func.SourceMap;
+            if (map != null && map.Count > 0)
+            {
+                // Largest entry with Offset <= _currentPc.
+                SourceMapEntry? best = null;
+                foreach (var e in map)
+                {
+                    if (e.Offset <= _currentPc) best = e;
+                    else break;
+                }
+                err.Source = best;
+            }
+
+            // Call stack, innermost first.
+            var stack = new List<string>(_frames.Count);
+            for (int i = _frames.Count - 1; i >= 0; i--)
+            {
+                var f = _frames[i];
+                var name = f.Func.DebugName;
+                var pc = i == _frames.Count - 1 ? _currentPc : f.RetPc;
+                stack.Add(pc != 0 ? $"{name}@0x{pc:X}" : name);
+            }
+            err.CallStack = stack;
+        }
+
+        return err;
+    }
 }

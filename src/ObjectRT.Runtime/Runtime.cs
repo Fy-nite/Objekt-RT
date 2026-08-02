@@ -1,5 +1,6 @@
 using System.Linq;
 using System.Reflection;
+using System.Threading;
 using ObjectRT.Abstractions;
 using ObjectRT.Reader;
 using ObjectRT.VM;
@@ -195,6 +196,48 @@ public sealed class Runtime
             (string? a, string? b) => string.Concat(a, b));
         RegisterNative("System.String.IsNullOrEmpty(string)",
             (string? s) => string.IsNullOrEmpty(s));
+
+        // Thread.Spawn(delegate) — the delegate is an object handle into the
+        // shared heap; run it on a fresh interpreter sharing the module state.
+        RegisterNative("Thread.Spawn",
+            (Func<object?, object?>)((object? d) => { SpawnThread(d); return null; }));
+        RegisterNative("Thread.Spawn(1)",
+            (Func<object?, object?>)((object? d) => { SpawnThread(d); return null; }));
+    }
+
+    /// <summary>
+    /// Starts an OS thread whose entry point runs the given delegate value.
+    /// The new thread uses a fresh <see cref="Interpreter"/> sharing this
+    /// runtime's module state (heap/statics/strings), so the delegate and its
+    /// closure are valid on the new thread. Fire-and-forget: no join/result in
+    /// v1; the thread is a background thread.
+    /// </summary>
+    public void SpawnThread(object? handle)
+    {
+        if (_compiled == null || _executor == null)
+            throw new InvalidOperationException("No module loaded.");
+        if (handle is not uint h)
+            throw new ArgumentException("Thread.Spawn argument must be a delegate handle.");
+
+        var mod = _compiled;
+        var state = ((ExecutorBase)_executor).State;
+        var t = new Thread(() =>
+        {
+            try
+            {
+                var exec = new Interpreter(mod, state);
+                exec.NativeCallHandler = ResolveNativeCall;
+                var result = exec.RunDelegate(h, Array.Empty<Value>());
+                if (result.IsError)
+                    Console.Error.WriteLine($"; Thread error: {result.Error}");
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"; Thread exception: {ex.Message}");
+            }
+        });
+        t.IsBackground = true;
+        t.Start();
     }
 
     // ── Module loading ─────────────────────────────────────────────
@@ -389,7 +432,7 @@ public sealed class Runtime
         var result = vm.RunFunction(funcIdx, vmArgs);
 
         if (result.IsError)
-            throw new InvalidOperationException($"Runtime error: {result.Error}");
+            throw new InvalidOperationException(result.Error.ToString());
 
         return vm.ValueToObject(result.Value);
     }

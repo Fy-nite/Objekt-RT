@@ -58,5 +58,16 @@ class Program
 {
     static method Main() -> void {
         call Tests.Test5_MessageBox() -> int32
+     
+        local t: int32
+        ldc.i4 1
+        while (stack)
+        {
+            ldloc t
+            ldc.i4 1
+            add
+            stloc t
+            ldc.i4 1
+        }
     }
 }

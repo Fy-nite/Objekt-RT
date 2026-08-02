@@ -231,6 +231,7 @@ public class ModuleCompiler
             NumLocals = method.LocalCount,
             MaxStack = 0,
         };
+        func.SourceMap = method.LineMappings;
 
         var state = new CompileState();
 

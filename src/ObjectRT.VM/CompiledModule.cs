@@ -35,6 +35,9 @@ public class CompiledFunction
     public uint StringStart { get; set; }
     public uint StringCount { get; set; }
 
+    /// <summary>Bytecode offset → original-source mapping (from `// #line` comments).</summary>
+    public List<SourceMapEntry> SourceMap { get; set; } = new();
+
     /// <summary>Index within the module's function table for fast dispatch.</summary>
     public uint SelfIndex { get; set; }
 }

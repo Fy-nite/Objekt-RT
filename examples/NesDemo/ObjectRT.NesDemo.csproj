@@ -9,7 +9,7 @@
 
   <ItemGroup>
     <!-- Emulator core + MonoGame host infrastructure -->
-    <ProjectReference Include="..\..\src\NesEmulator\NesEmulator.csproj" />
+    <ProjectReference Include="..\NesEmulator\NesEmulator.csproj" />
     <ProjectReference Include="..\..\src\ObjectRT.MonoGame\ObjectRT.MonoGame.csproj" />
   </ItemGroup>
 

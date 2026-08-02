@@ -49,7 +49,15 @@ public record MethodRecord
     public List<Instruction> Instructions { get; set; } = new();
     public byte[] RawInstructionData { get; set; } = Array.Empty<byte>();
     public List<AttributeRecord> Attributes { get; set; } = new();
+    /// <summary>Byte-offset → original-source mapping from `// #line` comments.</summary>
+    public List<SourceMapEntry> LineMappings { get; set; } = new();
 }
+
+/// <summary>
+/// Maps a bytecode offset within a method to a location in the original
+/// Contract source, captured from `// #line N:C "source"` comments.
+/// </summary>
+public record SourceMapEntry(uint Offset, int Line, int Column, string? Text);
 
 public record TypeRecord
 {

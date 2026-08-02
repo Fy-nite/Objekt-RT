@@ -120,11 +120,31 @@ assignments as `00 II`. Tables 1--255 are extension tables.
 [`17`], [`callvirt`],   [`32`], [`br`],        
 [`18`], [`ret`],        [`33`], [`brtrue`],
 [`19`], [`if`],         [`34`], [`brfalse`],
-[`1A`], [`while`],      
+[`1A`], [`while`],      [`35`], [`callnative`],
   )],
   kind: table,
   caption: [ORBT V1 opcode map — table 0 (main instruction table)],
 )
+
+Table 0 ends at `0x35` (`callnative`). New opcodes are allocated in
+extension tables using the `0xFF` prefix scheme.
+
+== Table 1 (Type Objects)
+
+#figure(
+  align(center)[#table(
+    columns: (14%, 30%, 56%),
+    align: (left, left, left),
+    table.header([#strong[Opcode]], [#strong[Mnemonic]], [#strong[Operand]]),
+    table.hline(),
+    [`01`], [`ldtype`], [`uint16` type name string index],
+  )],
+  kind: table,
+  caption: [ORBT extension table 1 — type object opcodes],
+)
+
+`ldtype` is encoded as the two-byte sequence `0xFF 0x01`. Its flat value
+under the `table * 256 + opcode` convention is `0x0101`.
 
 = String Pool Format
 
@@ -172,6 +192,33 @@ Each type in the type table is encoded as:
   kind: table,
   caption: [Type record format],
 )
+
+= Field Record Format
+
+Each field in a type's field record array is encoded as:
+
+#figure(
+  align(center)[#table(
+    columns: (30%, 70%),
+    align: (left, left),
+    table.header([#strong[Field]], [#strong[Description]]),
+    table.hline(),
+    [`name_index (uint16)`], [Index of field name in string pool],
+    [`type_index (uint16)`], [Index of field type name in string pool],
+    [`flags (byte)`],        [Bit flags — ORBT v2 addition: `0x01` = Static.],
+  )],
+  kind: table,
+  caption: [Field record format],
+)
+
+In ORBT v1 a field record is exactly four bytes (`name_index`,
+`type_index`); static-ness is implicit, encoded only by the choice of
+opcode (`ldsfld`/`stsfld` vs `ldfld`/`stfld`). ORBT v2 adds the explicit
+`flags` byte so that type objects and reflection (see ObjectRT.typ,
+§Type Objects and Reflection) can enumerate static members from metadata
+alone, without scanning instruction streams. Files that use the `flags`
+byte must set format version `0x02` in the header; v1 readers reject
+unknown format versions.
 
 = Import Table Format
 
@@ -410,17 +457,17 @@ encoding that follows depends on the instruction:
       [#strong[Instruction group]], [#strong[Operand encoding]], [#strong[Notes]],
     ),
     table.hline(),
-    [`ldc.i4`, `ldc.i8`, `ldc.r4`, `ldc.r8`], [Immediate value (fixed-width)], [i4=4 bytes, i8=8 bytes, r4=4 bytes, r8=8 bytes],
+    [`ldc`, `ldc.i4`, `ldc.i8`, `ldc.r4`, `ldc.r8`], [Immediate value (fixed-width)], [i4=4 bytes (`ldc` and `ldc.i4`), i8=8 bytes, r4=4 bytes, r8=8 bytes],
     [`ldstr`], [Length-prefixed UTF-8 string], [`uint16` length + data],
     [`ldarg`, `starg`, `ldloc`, `stloc`], [`uint16` index], [0-based index into arg/local table],
     [`ldfld`, `stfld`, `ldsfld`, `stsfld`], [`uint16` field name string index], [Index into string pool],
-    [`call`, `callvirt`], [`uint16` signature string index], [Index into string pool],
+    [`call`, `callvirt`, `callnative`], [`uint16` name string index + `uint16` parameter count], [Method-name string index into string pool; parameter count for argument popping],
     [`newobj`], [`uint16` type name string index], [Index into string pool],
     [`newarr`], [`uint16` element type string index], [`0xFFFF` = untyped],
     [`br`, `brtrue`, `brfalse`], [`int32` PC-relative offset], [Signed offset from end of instruction to target],
     [`if`, `while`], [Structured operand block], [See condition operand layout below],
     [`try`], [Structured operand block], [See exception handler layout below],
-    [`conv`, `castclass`, `isinst`], [`uint16` type name string index], [Index into string pool],
+    [`conv`, `castclass`, `isinst`, `ldtype`], [`uint16` type name string index], [Index into string pool],
     [All others], [No operand], [],
   )],
   kind: table,

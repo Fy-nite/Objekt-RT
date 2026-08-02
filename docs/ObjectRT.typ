@@ -174,6 +174,13 @@ separate *ORBT v1 Encoding Reference* (`fob-encoding.typ`).
 == Load Constants
 
 #instruction(
+  "ldc",
+  "-> i32",
+  "None",
+  "Push a 32-bit integer constant onto the stack. Backward-compatible alias for `ldc.i4` (identical encoding and behaviour). Operand: bare integer."
+)
+
+#instruction(
   "ldc.i4",
   "-> i32",
   "None",
@@ -419,6 +426,15 @@ supported for ceq and cne only. All other operand pairs are promoted to
   "Pop a value; push true if it is a managed object with the given type name, otherwise false."
 )
 
+== Type Objects
+
+#instruction(
+  "ldtype",
+  "-> type",
+  "TypeNotFoundError",
+  "Push the type object for the named type onto the evaluation stack. Type objects are singletons — repeated loads of the same type yield the same object — and are instances of the built-in class `Class`. See §Type Objects and Reflection under Runtime Extensions."
+)
+
 == Object and Array Operations
 
 #instruction(
@@ -463,6 +479,13 @@ supported for ceq and cne only. All other operand pairs are promoted to
   "args... obj -> [result]",
   "MissingMethodError, NullReference",
   "Same as call, but dispatch is virtual: the actual type of the receiver determines which override is executed."
+)
+
+#instruction(
+  "callnative",
+  "args... -> [result]",
+  "UnresolvedMethodError",
+  "Like `call`, but resolution goes directly to the native handler, bypassing the module function map. Same bytecode encoding as `call`/`callvirt` (method-name string index + parameter count); kept as a backward-compatible alias for hosts that need to force native dispatch."
 )
 
 #instruction(
@@ -575,8 +598,8 @@ Resolution proceeds as follows:
 = Runtime Extensions
 
 A conforming runtime may extend the base ObjectRT model with additional
-interoperability mechanisms. This section defines three optional extensions
-that a runtime *may* implement.
+interoperability mechanisms. This section defines several optional
+extensions that a runtime *may* implement.
 
 == Type Annotations
 
@@ -605,17 +628,25 @@ The method signature in the declaration dictates the parameter and return
 types expected at the native boundary. The runtime maps ObjectIR primitive
 types to their host-ABI equivalents:
 
-| IR type | C# type | C/C++ type (Windows) |
-|---------|---------|-----------------------|
-| `int32` | `int` | `int32_t` / `int` |
-| `uint32` | `uint` | `uint32_t` |
-| `int64` | `long` | `int64_t` |
-| `float32` | `float` | `float` |
-| `float64` | `double` | `double` |
-| `string` | `string` (LPWStr) | `const wchar_t*` |
-| `void` | `void` | `void` |
-| `bool` | `bool` | `BOOL` (int) |
-| `int8` | `sbyte` | `int8_t` |
+#figure(
+  align(center)[#table(
+    columns: 3,
+    align: (left, left, left),
+    table.header([#strong[IR type]], [#strong[C\# type]], [#strong[C/C++ type (Windows)]]),
+    table.hline(),
+    [`int32`], [`int`], [`int32_t` / `int`],
+    [`uint32`], [`uint`], [`uint32_t`],
+    [`int64`], [`long`], [`int64_t`],
+    [`float32`], [`float`], [`float`],
+    [`float64`], [`double`], [`double`],
+    [`string`], [`string` (LPWStr)], [`const wchar_t*`],
+    [`void`], [`void`], [`void`],
+    [`bool`], [`bool`], [`BOOL` (int)],
+    [`int8`], [`sbyte`], [`int8_t`],
+  )],
+  kind: table,
+  caption: [Native ABI type mapping for `@DllImport` bindings],
+)
 
 The method body declared in the source is a placeholder — the runtime
 bypasses it and dispatches directly to the native function. Every
@@ -648,8 +679,76 @@ Scripts call: `call MonoGame.Sprite.Draw(string, float32, float32)`.
 This extension allows the same ObjectIL module to target different hosts
 simply by changing which implementation objects are registered under well-
 known binding names. The type metadata is self-describing — no external
-configuration or C# source generation is required for the binding contract
+configuration or C\# source generation is required for the binding contract
 to be understood by a conforming runtime.
+
+== Type Objects and Reflection
+
+*Status: proposed extension. Documented to lock down the design before
+the ORBT v2 format work; not yet implemented by any reference runtime.*
+
+The module format already stores every type's metadata (`TypeRecord`) in
+the type table. A *type object* (class object) is that metadata
+materialised as a first-class runtime value, so a class can be referred to
+as a value, passed around, and reflected upon — "class as a class".
+
+The instruction `ldtype` (see §Type Objects in the Instruction Set
+Reference) pushes the type object for the named type:
+
+```
+ldtype Program            // -> type object for Program
+call Class.Name() -> string
+call IO.Println(object) -> void
+```
+
+The model has three rules:
+
+1. *Singletons.* There is exactly one type object per type per runtime.
+   `ldtype` on the same type twice yields the same object (reference
+   equal), so two loads of `Program` produce identical values.
+2. *One metaclass.* Every type object is an instance of the fixed
+   built-in class `Class`. There are no user-defined metaclasses and no
+   metaclass hierarchy: `Class` is a leaf in the type system, and type
+   objects are not themselves further reflected upon. This is the model
+   .NET (`RuntimeType`) and Java (`Class`) converged on — first-class
+   type values without Smalltalk's meta-meta recursion.
+3. *Descriptor, not owner.* A type object is a *view* over the type's
+   metadata. Static state remains in runtime static storage addressed by
+   `ldsfld`/`stsfld`; the type object exposes static members but does not
+   own them. (Making statics instance state of the class object — turning
+   every `ldsfld` into `ldfld` on the class object — is deliberately out
+   of scope; it requires a metaclass storage model this spec does not
+   define.)
+
+The built-in `Class` type exposes the following members (all non-static,
+called on the type object):
+
+#figure(
+  align(center)[#table(
+    columns: (32%, 68%),
+    align: (left, left),
+    table.header([#strong[Member]], [#strong[Description]]),
+    table.hline(),
+    [`Name() -> string`],       [Simple (unqualified) type name.],
+    [`Namespace() -> string`],  [Namespace, or empty string.],
+    [`BaseType() -> Class`],    [Type object of the base type, or null.],
+    [`Kind() -> int32`],        [Type kind: 1 = class, 2 = interface, 3 = struct, 4 = enum.],
+    [`IsAbstract() -> bool`],   [True if the type is abstract.],
+    [`IsStatic() -> bool`],     [True if the type declares no instance members.],
+    [`Fields() -> string[]`],   [Declared field names (instance and static).],
+    [`Methods() -> string[]`],  [Declared method names with signatures.],
+    [`Attributes() -> string[]`], [Annotation/attribute names on the type.],
+    [`Invoke(name, args...) -> object`], [Dynamic invocation of a static member by name. Requires `Reflection.Full`.],
+  )],
+  kind: table,
+  caption: [Members of the built-in Class type],
+)
+
+Type-object inspection requires the `Reflection.Basic` capability;
+dynamic invocation via `Invoke` requires `Reflection.Full`. Modules that
+use type objects should declare the capability they need in their
+`.metadata` `require`/`optional` lists (see ObjectIL.typ, §Module
+Metadata).
 
 == Call Resolution with Extensions
 
