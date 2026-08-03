@@ -31,6 +31,9 @@ public sealed class Interpreter : ExecutorBase
 
     public bool Trace { get => _trace; set => _trace = value; }
 
+    /// <summary>True when a VM function is currently executing on this interpreter.</summary>
+    public bool IsExecuting => _frames.Count > 0;
+
     public override void Reset(bool clearHeap = false, bool clearStatics = false)
     {
         _stack.Clear();
@@ -55,7 +58,11 @@ public sealed class Interpreter : ExecutorBase
 
         var frame = new Frame { Func = func, Pc = 0, StackBase = (uint)_stack.Count, Locals = _localsScratch, RetFunc = uint.MaxValue };
 
-        for (int i = 0; i < args.Length && i < func.NumParams; i++)
+        // Copy args into locals. Bound by localsLen rather than NumParams so an
+        // instance-method receiver (passed as arg 0 — the IR declares 'this' as
+        // the first parameter) and any reflection-supplied args land in the
+        // frame's local slots, mirroring how callvirt populates a frame.
+        for (int i = 0; i < args.Length && i < localsLen; i++)
             frame.Locals[i] = args[i];
 
         _frames.Add(frame);
@@ -118,7 +125,7 @@ public sealed class Interpreter : ExecutorBase
                     case Opcode.And: { int b = Pop().I4, a = Pop().I4; Push(Value.FromI4(a & b)); break; }
                     case Opcode.Or:  { int b = Pop().I4, a = Pop().I4; Push(Value.FromI4(a | b)); break; }
                     case Opcode.Xor: { int b = Pop().I4, a = Pop().I4; Push(Value.FromI4(a ^ b)); break; }
-                    case Opcode.Not: { Push(Value.FromI4(~Pop().I4)); break; }
+                    case Opcode.Not: { int v = Pop().I4; Push(Value.FromI4(v == 0 ? 1 : 0)); break; }
 
                     case Opcode.Ceq: { var b = Pop(); var a = Pop(); Push(Value.FromI4(CompareEquals(a, b) ? 1 : 0)); break; }
                     case Opcode.Cne: { var b = Pop(); var a = Pop(); Push(Value.FromI4(CompareEquals(a, b) ? 0 : 1)); break; }
@@ -204,18 +211,26 @@ public sealed class Interpreter : ExecutorBase
                             goto nextFrame;
                         }
 
-                        if (op != (ushort)Opcode.NativeCall && Mod.FunctionMap.TryGetValue(name, out var cfi))
+                        if (op != (ushort)Opcode.NativeCall)
                         {
-                            var callee = Mod.GetFunction(cfi);
-                            // Empty or single-ret body (e.g. @DllImport placeholder) — fall through to native.
-                            if (callee.Code.Length <= 2) { /* fall through */ }
+                            // Inheritance-aware: "Derived.Method" resolves to the
+                            // most-derived declaration — the base chain is walked
+                            // when the named type doesn't declare the method.
+                            uint cfi = Mod.ResolveFunction(name);
+                            if (cfi == uint.MaxValue) { /* no module function — fall through to native */ }
                             else
                             {
-                                var locals = new Value[callee.NumParams + callee.NumLocals + 1];
-                                Array.Fill(locals, Value.Nil());
-                                for (int ai = (int)callee.NumParams - 1; ai >= 0; ai--) locals[ai] = Pop();
-                                _frames.Add(new Frame { Func = callee, Pc = 0, StackBase = (uint)_stack.Count, Locals = locals, RetFunc = frame.Func.SelfIndex, RetPc = pc });
-                                goto nextFrame;
+                                var callee = Mod.GetFunction(cfi);
+                                // Empty or single-ret body (e.g. @DllImport placeholder) — fall through to native.
+                                if (callee.Code.Length <= 2) { /* fall through */ }
+                                else
+                                {
+                                    var locals = new Value[callee.NumParams + callee.NumLocals + 1];
+                                    Array.Fill(locals, Value.Nil());
+                                    for (int ai = (int)callee.NumParams - 1; ai >= 0; ai--) locals[ai] = Pop();
+                                    _frames.Add(new Frame { Func = callee, Pc = 0, StackBase = (uint)_stack.Count, Locals = locals, RetFunc = frame.Func.SelfIndex, RetPc = pc });
+                                    goto nextFrame;
+                                }
                             }
                         }
 

@@ -21,6 +21,7 @@
     <Project Path="src/ObjectRT.SourceGenerator/ObjectRT.SourceGenerator.csproj" />
     <Project Path="src/ObjectRT.VM/ObjectRT.VM.csproj" />
     <Project Path="src/ObjectRT.MonoGame/ObjectRT.MonoGame.csproj" />
+    <Project Path="src/ObjectRT.Runtime/tests/ObjectRT.Runtime.Tests/ObjectRT.Runtime.Tests.csproj" />
   </Folder>
   <Project Path="../ObjektRT.Core/ObjektRT.Core.csproj" />
   <Project Path="../ObjektRT.Core/tests/ObjektRT.Core.Tests/ObjektRT.Core.Tests.csproj" />

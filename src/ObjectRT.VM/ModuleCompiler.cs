@@ -162,6 +162,9 @@ public class ModuleCompiler
             found:;
         }
 
+        // Copy the field name → index map for static-field reflection.
+        mod.FieldMap = new Dictionary<string, uint>(_fieldMap);
+
         return mod;
     }
 

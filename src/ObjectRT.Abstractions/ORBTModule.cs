@@ -25,7 +25,7 @@ public class StringPool
 
 public record AttributeRecord(ushort NameIndex, List<ushort> ArgIndices);
 
-public record FieldRecord(ushort NameIndex, ushort TypeIndex);
+public record FieldRecord(ushort NameIndex, ushort TypeIndex, bool IsStatic = false);
 
 public record ParameterRecord(ushort NameIndex, ushort TypeIndex);
 

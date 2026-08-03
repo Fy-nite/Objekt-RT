@@ -151,7 +151,7 @@ public class ObjectILParser
         else throw new FormatException("Expected version number");
 
         mod.Version = new ModuleVersion(major, minor, patch);
-        mod.FormatVersion = 0x01;
+        mod.FormatVersion = 0x02; // v0x02: FieldRecord gains an IsStatic flag byte
     }
 
     private void ParseMetadataBlock(ORBTModule mod)
@@ -310,7 +310,7 @@ public class ObjectILParser
         if (next.Text == "field")
         {
             type.Access = access;
-            ParseField(mod, type);
+            ParseField(mod, type, (mflags & MethodFlags.Static) != 0);
         }
         else if (next.Text == "method")
         {
@@ -358,13 +358,13 @@ public class ObjectILParser
         else throw new FormatException($"Expected member declaration at {next.Line}, got '{next.Text}'");
     }
 
-    private void ParseField(ORBTModule mod, TypeRecord type)
+    private void ParseField(ORBTModule mod, TypeRecord type, bool isStatic = false)
     {
         _tokenizer.AdvanceToken();
         var name = ExpectIdentifier();
         Expect(TokenKind.Colon);
         var typeName = ReadTypeName();
-        type.Fields.Add(new FieldRecord(mod.StringPool.Add(name.Text), mod.StringPool.Add(typeName)));
+        type.Fields.Add(new FieldRecord(mod.StringPool.Add(name.Text), mod.StringPool.Add(typeName), isStatic));
         type.FieldCount++;
     }
 

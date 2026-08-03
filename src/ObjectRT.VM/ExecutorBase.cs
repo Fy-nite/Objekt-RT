@@ -68,6 +68,10 @@ public abstract class ExecutorBase : IExecutor
         long l => Value.FromI8(l),
         float f => Value.FromR4(f),
         double d => Value.FromR8(d),
+        // A boxed uint is a VM heap handle (ValueToObject returns the raw
+        // handle for VM-internal objects), so it round-trips as an Obj value —
+        // this is how instance-method receivers flow back into the VM.
+        uint h => Value.FromObj(h),
         _ => Value.FromObj(State.InternExternal(val)),
     };
 

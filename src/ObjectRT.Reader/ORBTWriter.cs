@@ -72,6 +72,9 @@ public class ORBTWriter
             {
                 WriteU16(f.NameIndex);
                 WriteU16(f.TypeIndex);
+                // v0x02: per-field static flag byte (absent in v0x01 modules).
+                if (mod.FormatVersion >= 0x02)
+                    WriteU8(f.IsStatic ? (byte)1 : (byte)0);
             }
 
             WriteU16(type.MethodCount);

@@ -6,6 +6,7 @@ namespace ObjectRT.Reader;
 public class ORBTReader
 {
     private readonly BinaryStream _stream;
+    private byte _formatVersion;
 
     public ORBTReader(BinaryStream stream)
     {
@@ -33,8 +34,9 @@ public class ORBTReader
             throw new InvalidDataException($"Invalid ORBT magic: expected 0x4F524254, got 0x{magic:X8}");
 
         mod.FormatVersion = _stream.ReadU8();
-        if (mod.FormatVersion != 0x01)
+        if (mod.FormatVersion != 0x01 && mod.FormatVersion != 0x02)
             throw new InvalidDataException($"Unsupported ORBT version: {mod.FormatVersion}");
+        _formatVersion = mod.FormatVersion;
 
         mod.ModuleName = _stream.ReadString();
 
@@ -90,7 +92,11 @@ public class ORBTReader
 
     private FieldRecord ReadFieldRecord()
     {
-        return new FieldRecord(_stream.ReadU16(), _stream.ReadU16());
+        var name = _stream.ReadU16();
+        var type = _stream.ReadU16();
+        // v0x02 modules carry a per-field static flag byte AFTER name+type.
+        bool isStatic = _formatVersion >= 0x02 && _stream.ReadU8() != 0;
+        return new FieldRecord(name, type, isStatic);
     }
 
     private ParameterRecord ReadParamRecord()

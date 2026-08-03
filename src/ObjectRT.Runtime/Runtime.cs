@@ -4,6 +4,9 @@ using System.Threading;
 using ObjectRT.Abstractions;
 using ObjectRT.Reader;
 using ObjectRT.VM;
+// Alias so bare "MethodInfo" keeps meaning System.Reflection.MethodInfo
+// (used by ObjectRTDispatchProxy); module reflection lives under its own name.
+using ObjectRTReflection = ObjectRT.Runtime.Reflection;
 
 namespace ObjectRT.Runtime;
 
@@ -259,6 +262,9 @@ public sealed class Runtime
     /// <summary>Load an ObjectRT module from an already-parsed ORBTModule.</summary>
     public void LoadModule(ORBTModule module)
     {
+        // Retained so the loaded program can be inspected via GetReflector().
+        LoadedModule = module;
+
         // Strip placeholder bodies from @DllImport classes so the interpreter
         // falls through to the DllImportResolver instead of executing the stub.
         foreach (var type in module.Types)
@@ -284,6 +290,12 @@ public sealed class Runtime
     public bool IsLoaded => _compiled != null;
 
     /// <summary>
+    /// The source module most recently loaded (retained for reflection via
+    /// <see cref="GetReflector"/>). Null when nothing has been loaded yet.
+    /// </summary>
+    public ORBTModule? LoadedModule { get; private set; }
+
+    /// <summary>
     /// Reset the executor state between top-level calls. Creates a fresh
     /// executor so per-call state (stack, frames) is clean.
     /// </summary>
@@ -291,6 +303,39 @@ public sealed class Runtime
     {
         if (_compiled != null)
             _executor = CreateExecutor(_compiled);
+    }
+
+    // ── Reflection ─────────────────────────────────────────────────
+
+    /// <summary>
+    /// C#-style reflection over the loaded module: enumerate types, methods,
+    /// fields and attributes, walk inheritance hierarchies, and get invokable
+    /// method references (including inherited ones). Returns null when no
+    /// module is loaded.
+    /// </summary>
+    public ObjectRTReflection.ModuleReflector? GetReflector() =>
+        LoadedModule != null ? new ObjectRTReflection.ModuleReflector(LoadedModule) : null;
+
+    /// <summary>
+    /// Reads a static field's current value by qualified name ("Type.field").
+    /// Returns null when nothing is loaded or the field is unknown.
+    /// </summary>
+    public object? GetStaticField(string qualifiedName)
+    {
+        if (_compiled == null || _executor is not ExecutorBase ex) return null;
+        if (!_compiled.FieldMap.TryGetValue(qualifiedName, out var idx)) return null;
+        return ex.ValueToObject(ex.StaticFields[(int)idx]);
+    }
+
+    /// <summary>
+    /// Writes a static field by qualified name ("Type.field"). No-op when
+    /// nothing is loaded or the field is unknown.
+    /// </summary>
+    public void SetStaticField(string qualifiedName, object? value)
+    {
+        if (_compiled == null || _executor is not ExecutorBase ex) return;
+        if (!_compiled.FieldMap.TryGetValue(qualifiedName, out var idx)) return;
+        ex.StaticFields[(int)idx] = ex.MarshalValue(value);
     }
 
     // ── Native method registration ─────────────────────────────────
@@ -417,17 +462,32 @@ public sealed class Runtime
         if (_compiled == null)
             throw new InvalidOperationException("No module loaded. Call LoadModule() first.");
 
-        if (!_compiled.FunctionMap.TryGetValue(qualifiedName, out var funcIdx))
+        // Inheritance-aware: "Derived.Method" also resolves when the method is
+        // declared on a base type (most-derived declaration wins).
+        var funcIdx = _compiled.ResolveFunction(qualifiedName);
+        if (funcIdx == uint.MaxValue)
             throw new MissingMethodException($"Method '{qualifiedName}' not found in loaded module and no resolver handled it.");
 
-        // Reuse executor across calls — Reset() clears per-call state.
-        var vm = _executor ??= CreateExecutor(_compiled);
+        // Reuse executor across calls — Reset() clears per-call state. BUT when
+        // this call comes from inside a running VM function (re-entrancy — e.g.
+        // a host binding like Reflect.Call invoking another module method),
+        // Reset() would wipe the OUTER frames. Use a fresh interpreter sharing
+        // the same heap/statics instead.
+        IExecutor vm;
+        if (_executor is Interpreter active && active.IsExecuting)
+        {
+            vm = new Interpreter(_compiled, active.State);
+            AttachHostHandlers(vm);
+        }
+        else
+        {
+            vm = _executor ??= CreateExecutor(_compiled);
+            vm.Reset(clearHeap: false, clearStatics: false);
+        }
 
         var vmArgs = args.Length > 0 ? new Value[args.Length] : Array.Empty<Value>();
         for (int i = 0; i < args.Length; i++)
             vmArgs[i] = vm.MarshalValue(args[i]);
-
-        vm.Reset(clearHeap: false, clearStatics: false);
 
         var result = vm.RunFunction(funcIdx, vmArgs);
 

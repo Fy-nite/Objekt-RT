@@ -78,6 +78,9 @@ public class CompiledModule
 
     public Dictionary<string, uint> FunctionMap { get; set; } = new();
 
+    /// <summary>Field qualified name ("Type.field") → flat field index (for static access).</summary>
+    public Dictionary<string, uint> FieldMap { get; set; } = new();
+
     public bool HasEntry => EntryFunction < Functions.Count;
 
     public uint FindFunction(string name) =>
@@ -87,4 +90,39 @@ public class CompiledModule
     public CompiledFunction GetFunction(uint idx) => Functions[(int)idx];
     public VMType GetType(uint idx) => Types[(int)idx];
     public string GetString(uint idx) => Strings[(int)idx];
+
+    /// <summary>
+    /// Finds a function by its qualified name ("Type.Method"), falling back to
+    /// inheritance-aware resolution: when the named type does not declare the
+    /// method itself, its base-type chain is walked most-derived first (so
+    /// "Derived.Method" resolves to an inherited declaration, and an override
+    /// on a derived type shadows the base one). Returns
+    /// <see cref="uint.MaxValue"/> when nothing matches.
+    /// </summary>
+    public uint ResolveFunction(string name)
+    {
+        if (FunctionMap.TryGetValue(name, out var idx)) return idx;
+
+        int dot = name.LastIndexOf('.');
+        if (dot <= 0 || dot >= name.Length - 1) return uint.MaxValue;
+        string typeName = name[..dot];
+        string methodName = name[(dot + 1)..];
+
+        var seen = new HashSet<int>();
+        int typeIdx = FindTypeIndex(typeName);
+        while (typeIdx >= 0 && seen.Add(typeIdx))
+        {
+            var type = Types[typeIdx];
+            if (FunctionMap.TryGetValue($"{type.DebugName}.{methodName}", out idx)) return idx;
+            typeIdx = type.BaseType;
+        }
+        return uint.MaxValue;
+    }
+
+    private int FindTypeIndex(string name)
+    {
+        for (int i = 0; i < Types.Count; i++)
+            if (Types[i].DebugName == name) return i;
+        return -1;
+    }
 }
