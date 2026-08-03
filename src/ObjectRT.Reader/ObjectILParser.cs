@@ -226,6 +226,31 @@ public class ObjectILParser
         var nameTok = ExpectIdentifier();
         type.NameIndex = mod.StringPool.Add(nameTok.Text);
 
+        // Base type / interface list: class Foo : Base, IFace { ... }
+        if (_tokenizer.PeekToken().Kind == TokenKind.Colon)
+        {
+            _tokenizer.AdvanceToken();
+            var first = true;
+            while (true)
+            {
+                var baseName = ExpectIdentifier().Text;
+                if (first)
+                {
+                    // The first entry is the base type when it resolves to a
+                    // type declared in this module; otherwise it is treated as
+                    // an interface reference (external bases cannot be indexed).
+                    type.BaseTypeIndex = FindTypeIndex(mod, baseName);
+                    first = false;
+                }
+                else
+                {
+                    type.InterfaceIndices.Add(mod.StringPool.Add(baseName));
+                    type.InterfaceCount++;
+                }
+                if (TryMatch(TokenKind.Comma) == null) break;
+            }
+        }
+
         if (_tokenizer.PeekToken().Text == "implements")
         {
             _tokenizer.AdvanceToken();
@@ -246,10 +271,23 @@ public class ObjectILParser
         mod.Types.Add(type);
     }
 
+    private int FindTypeIndex(ORBTModule mod, string name)
+    {
+        for (int i = 0; i < mod.Types.Count; i++)
+        {
+            if (mod.Resolve(mod.Types[i].NameIndex) == name)
+                return i;
+        }
+        return -1;
+    }
+
     private void ParseMember(ORBTModule mod, TypeRecord type)
     {
         var access = MemberAccess.Public;
         var mflags = MethodFlags.None;
+
+        // @Attributes before the member declaration.
+        var attributes = ParseAttributes(mod);
 
         while (_tokenizer.PeekToken().Kind == TokenKind.Keyword)
         {
@@ -282,6 +320,7 @@ public class ObjectILParser
             {
                 type.Methods[^1].Flags |= mflags;
                 type.Methods[^1].Access = access;
+                type.Methods[^1].Attributes.AddRange(attributes);
             }
         }
         else if (next.Text == "constructor")
@@ -311,6 +350,7 @@ public class ObjectILParser
 
             method.SignatureIndex = method.NameIndex;
             method.ParamCount = (ushort)method.Params.Count;
+            method.Attributes.AddRange(attributes);
             ParseMethodBody(mod, method);
             type.Methods.Add(method);
             type.MethodCount++;
