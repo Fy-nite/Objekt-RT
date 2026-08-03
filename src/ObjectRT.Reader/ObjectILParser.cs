@@ -423,7 +423,7 @@ public class ObjectILParser
         method.ParamCount = (ushort)method.Params.Count;
 
         Expect(TokenKind.Arrow);
-        method.SignatureIndex = mod.StringPool.Add(ExpectIdentifier().Text);
+        method.SignatureIndex = mod.StringPool.Add(ReadTypeName());
 
         ParseMethodBody(mod, method);
         type.Methods.Add(method);
@@ -496,6 +496,7 @@ public class ObjectILParser
 
         if (next.Text == "if") { _tokenizer.AdvanceToken(); ParseIf(mod, method, code); return; }
         if (next.Text == "while") { _tokenizer.AdvanceToken(); ParseWhile(mod, method, code); return; }
+        if (next.Text == "switch") { _tokenizer.AdvanceToken(); ParseSwitch(mod, method, code); return; }
 
         if (next.Text == "break")
         {
@@ -605,6 +606,105 @@ public class ObjectILParser
 
         _breakTargets.Pop();
         _continueTargets.Pop();
+        PlaceLabel(endLabel, code);
+    }
+
+    /// <summary>
+    /// Parses a structured <c>switch (stack) { case N: / case "s": / case else: }</c>
+    /// block and lowers it to flat bytecode. The switch expression is already on
+    /// the stack. Per case: dup + load case value + ceq + brfalse to a label
+    /// placed AFTER the case body; the body pops the dup'd value and branches to
+    /// the switch end. The value is consumed exactly once on every path.
+    /// </summary>
+    private void ParseSwitch(ORBTModule mod, MethodRecord method, List<byte> code)
+    {
+        Expect(TokenKind.OpenParen);
+        var cond = ExpectIdentifier();
+        if (cond.Text != "stack") throw new FormatException($"Expected 'stack' condition in switch at {cond.Line}");
+        Expect(TokenKind.CloseParen);
+        Expect(TokenKind.OpenBrace);
+
+        int endLabel = FreshLabel();
+        _breakTargets.Push(endLabel);
+
+        bool sawElse = false;
+
+        while (_tokenizer.PeekToken().Kind != TokenKind.CloseBrace
+               && _tokenizer.PeekToken().Kind != TokenKind.Eof)
+        {
+            var header = _tokenizer.PeekToken();
+            if (header.Text != "case")
+                throw new FormatException($"Expected 'case' in switch at {header.Line}, got '{header.Text}'");
+            _tokenizer.AdvanceToken();
+
+            var valTok = _tokenizer.AdvanceToken();
+            var colon = _tokenizer.AdvanceToken();
+            if (colon.Text != ":") throw new FormatException($"Expected ':' after case at {colon.Line}");
+
+            if (valTok.Text == "else")
+            {
+                if (sawElse) throw new FormatException("Duplicate else in switch");
+                sawElse = true;
+                // Drop the switch value, then the else body runs inline.
+                code.Add(0x23); // pop
+                while (_tokenizer.PeekToken().Kind != TokenKind.CloseBrace
+                       && _tokenizer.PeekToken().Kind != TokenKind.Eof
+                       && _tokenizer.PeekToken().Text != "case")
+                    ParseStatement(mod, method, code);
+                continue;
+            }
+
+            if (sawElse)
+                throw new FormatException("Case after else in switch");
+
+            int notLabel = FreshLabel();
+
+            // Compare the dup'd switch value against this case's value.
+            code.Add(0x22); // dup
+            if (valTok.Kind == TokenKind.Integer)
+            {
+                code.Add(0x2B); // ldc.i4
+                EmitI32(code, int.Parse(valTok.Text));
+            }
+            else if (valTok.Kind == TokenKind.String)
+            {
+                code.Add(0x02); // ldstr
+                EmitU16(code, mod.StringPool.Add(valTok.Text));
+            }
+            else
+            {
+                throw new FormatException($"Invalid switch case value '{valTok.Text}' at {valTok.Line}");
+            }
+            code.Add(0x0D); // ceq
+            code.Add(0x34); // brfalse → notLabel
+            _fixups.Add(new PendingBranch(code.Count, notLabel));
+            EmitI32(code, 0);
+            method.InstrCount += 4; // dup, load, ceq, brfalse
+
+            // Case body: drop the dup'd value, run the body, jump to end.
+            code.Add(0x23); // pop
+            while (_tokenizer.PeekToken().Kind != TokenKind.CloseBrace
+                   && _tokenizer.PeekToken().Kind != TokenKind.Eof
+                   && _tokenizer.PeekToken().Text != "case")
+                ParseStatement(mod, method, code);
+            code.Add(0x32); // br → end
+            _fixups.Add(new PendingBranch(code.Count, endLabel));
+            EmitI32(code, 0);
+            method.InstrCount += 2; // pop, br
+
+            // Fall-through point for the next case's comparison.
+            PlaceLabel(notLabel, code);
+        }
+
+        Expect(TokenKind.CloseBrace);
+
+        if (!sawElse)
+        {
+            // No case matched and no else — drop the switch value.
+            code.Add(0x23); // pop
+        }
+
+        _breakTargets.Pop();
         PlaceLabel(endLabel, code);
     }
 

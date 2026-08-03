@@ -320,8 +320,21 @@ public class ModuleCompiler
                     if (state.CurrentDepth > 0) state.CurrentDepth--;
                     break;
 
+                case Opcode.Ldelem:
+                    // pop 2, push 1 → net -1
+                    if (state.CurrentDepth > 0) state.CurrentDepth--;
+                    break;
+
+                case Opcode.Stelem:
+                    // pop 3, push 0 → net -3
+                    if (state.CurrentDepth > 0) state.CurrentDepth--;
+                    if (state.CurrentDepth > 0) state.CurrentDepth--;
+                    if (state.CurrentDepth > 0) state.CurrentDepth--;
+                    break;
+
                 case Opcode.Neg: case Opcode.Not:
                 case Opcode.Call: case Opcode.Callvirt:
+                case Opcode.Ldlen: // pop 1, push 1 → net 0
                     // neutral for now
                     break;
             }
@@ -419,8 +432,18 @@ public class ModuleCompiler
                 case Opcode.Newobj: case Opcode.Newarr:
                 {
                     string typeRef = src.Resolve(((OperandString)instr.Operand).StringIndex);
-                    if (_typeMap.TryGetValue(typeRef, out var ti))
+                    // newarr's operand is the ELEMENT type name (e.g. "int32"),
+                    // which is never a declared module type. The runtime arrays
+                    // are untyped (CLR object arrays), so the operand is
+                    // informational — don't require it to resolve.
+                    if (instr.Opcode == Opcode.Newarr)
+                    {
+                        EmitU16(state, 0);
+                    }
+                    else if (_typeMap.TryGetValue(typeRef, out var ti))
+                    {
                         EmitU16(state, (ushort)ti);
+                    }
                     else
                     {
                         state.Error ??= $"Unresolved type '{typeRef}' in {fullName}";
@@ -561,7 +584,7 @@ public class ModuleCompiler
                 or Opcode.Not or Opcode.Dup or Opcode.Pop
                 or Opcode.Ldnull or Opcode.Ret or Opcode.Break
                 or Opcode.Continue or Opcode.Throw
-                or Opcode.Ldelem or Opcode.Stelem
+                or Opcode.Ldelem or Opcode.Stelem or Opcode.Ldlen
                 => 0,
 
             Opcode.LdcI4 or Opcode.Ldc or Opcode.LdcR4 => 4,

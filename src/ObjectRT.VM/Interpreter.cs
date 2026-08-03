@@ -120,8 +120,8 @@ public sealed class Interpreter : ExecutorBase
                     case Opcode.Xor: { int b = Pop().I4, a = Pop().I4; Push(Value.FromI4(a ^ b)); break; }
                     case Opcode.Not: { Push(Value.FromI4(~Pop().I4)); break; }
 
-                    case Opcode.Ceq: { var b = Pop(); var a = Pop(); Push(Value.FromI4(NumericCompare(a, b) == 0 ? 1 : 0)); break; }
-                    case Opcode.Cne: { var b = Pop(); var a = Pop(); Push(Value.FromI4(NumericCompare(a, b) != 0 ? 1 : 0)); break; }
+                    case Opcode.Ceq: { var b = Pop(); var a = Pop(); Push(Value.FromI4(CompareEquals(a, b) ? 1 : 0)); break; }
+                    case Opcode.Cne: { var b = Pop(); var a = Pop(); Push(Value.FromI4(CompareEquals(a, b) ? 0 : 1)); break; }
                     case Opcode.Cgt: { var b = Pop(); var a = Pop(); Push(Value.FromI4(NumericCompare(a, b) > 0 ? 1 : 0)); break; }
                     case Opcode.Cge: { var b = Pop(); var a = Pop(); Push(Value.FromI4(NumericCompare(a, b) >= 0 ? 1 : 0)); break; }
                     case Opcode.Clt: { var b = Pop(); var a = Pop(); Push(Value.FromI4(NumericCompare(a, b) < 0 ? 1 : 0)); break; }
@@ -234,8 +234,13 @@ public sealed class Interpreter : ExecutorBase
 
                     case Opcode.Ret:
                     {
-                        var retval = _stack.Count > 0 ? _stack[^1] : Value.Nil();
-                        if (_stack.Count > 0) _stack.RemoveAt(_stack.Count - 1);
+                        // The return value lives in THIS frame's region of the
+                        // shared stack ([StackBase .. count)). Values below
+                        // StackBase belong to the caller and must not be read
+                        // as the return value — a void method that leaves its
+                        // region empty returns nil, not the caller's residue.
+                        var retval = _stack.Count > frame.StackBase ? _stack[^1] : Value.Nil();
+                        if (_stack.Count > frame.StackBase) _stack.RemoveAt(_stack.Count - 1);
                         uint rf = frame.RetFunc, rp = frame.RetPc;
                         _frames.RemoveAt(_frames.Count - 1);
                         if (_frames.Count == 0) { Push(retval); return retval; }
@@ -249,9 +254,49 @@ public sealed class Interpreter : ExecutorBase
 
                     case Opcode.Newobj:
                         { ushort ti = ReadU16(code, ref pc); var ar = AllocObject(ti); if (ar.IsError) return ar.Error; Push(Value.FromObj(ar.Value)); break; }
-                    case Opcode.Newarr: { ReadU16(code, ref pc); Push(Value.Nil()); break; }
-                    case Opcode.Ldelem: { Pop(); Pop(); Push(Value.Nil()); break; }
-                    case Opcode.Stelem: { Pop(); Pop(); Pop(); break; }
+                    case Opcode.Newarr:
+                        {
+                            // Operand is the element type name (v1 arrays are
+                            // untyped CLR object arrays) — informational only.
+                            ReadU16(code, ref pc);
+                            var len = Pop();
+                            if (len.Tag != ValueTag.I4 || len.I4 < 0)
+                                return Err(VmErrorKind.TypeMismatch, "newarr: length must be a non-negative int");
+                            var arr = new object[len.I4];
+                            Push(Value.FromObj(State.InternExternal(arr)));
+                            break;
+                        }
+                    case Opcode.Ldelem:
+                        {
+                            var index = Pop();
+                            var arrVal = Pop();
+                            if (GetExternalArray(arrVal) is not System.Array arr)
+                                return Err(VmErrorKind.NotAnObject, "ldelem on non-array");
+                            if (index.Tag != ValueTag.I4 || index.I4 < 0 || index.I4 >= arr.Length)
+                                return Err(VmErrorKind.OutOfBounds, $"ldelem index {(index.Tag == ValueTag.I4 ? index.I4.ToString() : "?")} out of bounds ({arr.Length})");
+                            Push(MarshalValue(arr.GetValue(index.I4)));
+                            break;
+                        }
+                    case Opcode.Stelem:
+                        {
+                            var val = Pop();
+                            var index = Pop();
+                            var arrVal = Pop();
+                            if (GetExternalArray(arrVal) is not System.Array arr)
+                                return Err(VmErrorKind.NotAnObject, "stelem on non-array");
+                            if (index.Tag != ValueTag.I4 || index.I4 < 0 || index.I4 >= arr.Length)
+                                return Err(VmErrorKind.OutOfBounds, $"stelem index {(index.Tag == ValueTag.I4 ? index.I4.ToString() : "?")} out of bounds ({arr.Length})");
+                            arr.SetValue(ValueToObject(val), index.I4);
+                            break;
+                        }
+                    case Opcode.Ldlen:
+                        {
+                            var arrVal = Pop();
+                            if (GetExternalArray(arrVal) is not System.Array arr)
+                                return Err(VmErrorKind.NotAnObject, "ldlen on non-array");
+                            Push(Value.FromI4(arr.Length));
+                            break;
+                        }
                     case Opcode.Conv: case Opcode.Castclass: case Opcode.Isinst: { ReadU16(code, ref pc); break; }
 
                     case Opcode.If: case Opcode.While:
@@ -270,6 +315,29 @@ public sealed class Interpreter : ExecutorBase
     }
 
     // ── Delegate dispatch (shared by the interpreter case and threads) ──
+
+    /// <summary>Resolves an external object handle to a CLR <see cref="System.Array"/>, or null.</summary>
+    private System.Array? GetExternalArray(Value v)
+    {
+        if (v.Tag != ValueTag.Obj || !ExecutorState.IsExternal(v.AsObj()))
+            return null;
+        return State.GetExternal(v.AsObj()) as System.Array;
+    }
+
+    /// <summary>
+    /// Equality for ceq/cne. Strings compare by value; anything else falls back
+    /// to numeric comparison (which is also the fallback for mixed types).
+    /// </summary>
+    private bool CompareEquals(Value a, Value b)
+    {
+        if (a.Tag == ValueTag.Str || b.Tag == ValueTag.Str)
+        {
+            if (a.Tag != ValueTag.Str || b.Tag != ValueTag.Str)
+                return false;
+            return string.Equals(GetStringValue(a.AsStr()), GetStringValue(b.AsStr()), StringComparison.Ordinal);
+        }
+        return NumericCompare(a, b) == 0;
+    }
 
     /// <summary>
     /// Reads a delegate value's target method name and closure object from the

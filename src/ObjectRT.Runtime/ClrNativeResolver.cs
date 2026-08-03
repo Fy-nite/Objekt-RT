@@ -119,6 +119,7 @@ public sealed class ClrNativeResolver : INativeResolver
 
     private static Delegate? CreateInvokeDelegate(MethodInfo method, string qualifiedName)
     {
+        var parameters = method.GetParameters();
         // Wrap MethodInfo.Invoke in a lambda so any caller can invoke it
         // with object?[] args. This works in NativeAOT as long as the
         // method wasn't trimmed, and avoids DynamicInvoke signature issues.
@@ -126,6 +127,27 @@ public sealed class ClrNativeResolver : INativeResolver
         {
             try
             {
+                // Coerce VM-marshaled values to the declared parameter types.
+                // The VM tags bools as I4 (1/0), so reflection Invoke would
+                // reject Debug.Assert(bool, ...) with an int argument.
+                for (int i = 0; i < parameters.Length && i < args.Length; i++)
+                {
+                    var target = parameters[i].ParameterType;
+                    var v = args[i];
+                    if (v == null) continue;
+                    if (target == typeof(bool) && v is int i4)
+                        args[i] = i4 != 0;
+                    else if (target == typeof(int) && v is bool b)
+                        args[i] = b ? 1 : 0;
+                    else if (target == typeof(double) && v is int i5)
+                        args[i] = (double)i5;
+                    else if (target == typeof(double) && v is long l5)
+                        args[i] = (double)l5;
+                    else if (target == typeof(float) && v is int i6)
+                        args[i] = (float)i6;
+                    else if (target == typeof(long) && v is int i7)
+                        args[i] = (long)i7;
+                }
                 return method.Invoke(null, args);
             }
             catch (TargetInvocationException tie)

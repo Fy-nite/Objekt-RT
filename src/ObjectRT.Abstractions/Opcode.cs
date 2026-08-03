@@ -61,6 +61,7 @@ public enum Opcode : ushort
     Brtrue    = 0x33,
     Brfalse   = 0x34,
     NativeCall = 0x35,
+    Ldlen     = 0x36,
 }
 
 public static class OpcodeExtensions
@@ -86,6 +87,7 @@ public static class OpcodeExtensions
         Opcode.Ldsfld    => "ldsfld",
         Opcode.Stsfld    => "stsfld",
         Opcode.Newobj    => "newobj",
+        Opcode.Ldlen     => "ldlen",
         Opcode.Newarr    => "newarr",
         Opcode.Ldelem    => "ldelem",
         Opcode.Stelem    => "stelem",
@@ -147,6 +149,7 @@ public static class OpcodeExtensions
             "ldc.r4"    => 0x2D, "ldc.r8"    => 0x2E, "and"       => 0x2F,
             "xor"       => 0x30, "or"        => 0x31, "br"        => 0x32,
             "brtrue"    => 0x33, "brfalse"   => 0x34, "callnative" => 0x35,
+            "ldlen"     => 0x36,
             _           => -1,
         };
     }
