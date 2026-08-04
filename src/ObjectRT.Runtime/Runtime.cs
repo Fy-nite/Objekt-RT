@@ -249,6 +249,72 @@ public sealed class Runtime : IHostedRuntime
             (Func<object?, object?>)((object? d) => { SpawnThread(d); return null; }));
         RegisterNative("Thread.Spawn(1)",
             (Func<object?, object?>)((object? d) => { SpawnThread(d); return null; }));
+
+        // Thread handles — C#-style lifecycle: Thread.Create(work) gives you a
+        // thread value you can store, start explicitly, join, and poll.
+        RegisterNative("Thread.Create",
+            (Func<object?, object?>)(d => CreateThread(d)));
+        RegisterNative("Thread.Create(1)",
+            (Func<object?, object?>)(d => CreateThread(d)));
+        RegisterNative("Thread.Start",
+            (Action<object?>)(t => StartThread(RequireThread(t))));
+        RegisterNative("Thread.Start(1)",
+            (Action<object?>)(t => StartThread(RequireThread(t))));
+        RegisterNative("Thread.Join",
+            (Action<object?>)(t => RequireThread(t).Join()));
+        RegisterNative("Thread.Join(1)",
+            (Action<object?>)(t => RequireThread(t).Join()));
+        RegisterNative("Thread.IsAlive",
+            (Func<object?, bool>)(t => RequireThread(t).IsAlive));
+        RegisterNative("Thread.IsAlive(1)",
+            (Func<object?, bool>)(t => RequireThread(t).IsAlive));
+    }
+
+    /// <summary>
+    /// Wraps a VM delegate handle in a <see cref="ThreadHandle"/> — the value
+    /// form of a thread. Nothing runs until <c>Thread.Start</c> is called.
+    /// </summary>
+    private object CreateThread(object? d)
+    {
+        if (d is not uint h)
+            throw new ArgumentException("Thread.Create argument must be a delegate (fun ...).");
+        return new ThreadHandle(h);
+    }
+
+    /// <summary>Coerces a native argument to a <see cref="ThreadHandle"/>.</summary>
+    private static ThreadHandle RequireThread(object? t)
+        => t as ThreadHandle
+           ?? throw new ArgumentException("Thread argument must be a Thread.Create() handle.");
+
+    /// <summary>
+    /// Starts a <see cref="ThreadHandle"/>: its delegate runs on a fresh
+    /// interpreter sharing this runtime's module state, so the delegate and
+    /// its closure are valid on the new thread.
+    /// </summary>
+    private void StartThread(ThreadHandle thread)
+    {
+        if (thread.Started)
+            throw new InvalidOperationException("Thread already started.");
+        if (_compiled == null || _executor == null)
+            throw new InvalidOperationException("No module loaded.");
+
+        var mod = _compiled;
+        var state = ((ExecutorBase)_executor).State;
+        thread.Launch(() =>
+        {
+            try
+            {
+                var exec = new Interpreter(mod, state);
+                exec.NativeCallHandler = ResolveNativeCall;
+                var result = exec.RunDelegate(thread.DelegateHandle, Array.Empty<Value>());
+                if (result.IsError)
+                    Console.Error.WriteLine($"; Thread error: {result.Error}");
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"; Thread exception: {ex.Message}");
+            }
+        });
     }
 
     /// <summary>
@@ -446,14 +512,14 @@ public sealed class Runtime : IHostedRuntime
         if (_nativeMethods.TryGetValue(qualifiedName, out var native))
         {
             resolved = true;
-            return native.DynamicInvoke(args);
+            return InvokeNative(native, args);
         }
 
         var withParamCount = $"{qualifiedName}({args.Length})";
         if (_nativeMethods.TryGetValue(withParamCount, out native))
         {
             resolved = true;
-            return native.DynamicInvoke(args);
+            return InvokeNative(native, args);
         }
 
         // Builtins are registered under signature-qualified keys (e.g.
@@ -485,11 +551,29 @@ public sealed class Runtime : IHostedRuntime
                 resolved = true;
                 return del is Func<object?[], object?> wrapper
                     ? wrapper(args)
-                    : del.DynamicInvoke(args);
+                    : InvokeNative(del, args);
             }
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Invokes a native delegate, unwrapping the <see cref="TargetInvocationException"/>
+    /// that <see cref="Delegate.DynamicInvoke(object[])"/> wraps around exceptions
+    /// thrown by the delegate, so script error messages show the real cause.
+    /// </summary>
+    private static object? InvokeNative(Delegate d, object?[] args)
+    {
+        try
+        {
+            return d.DynamicInvoke(args);
+        }
+        catch (System.Reflection.TargetInvocationException tie) when (tie.InnerException != null)
+        {
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(tie.InnerException).Throw();
+            throw; // unreachable
+        }
     }
 
     /// <summary>
