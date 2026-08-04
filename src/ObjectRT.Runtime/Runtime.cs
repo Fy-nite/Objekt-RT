@@ -31,7 +31,7 @@ namespace ObjectRT.Runtime;
 /// int sum = rt.CallMethod&lt;int&gt;("Calc.Add", 3, 4);
 /// </code>
 /// </summary>
-public sealed class Runtime
+public sealed class Runtime : IHostedRuntime
 {
     /// <summary>Shared singleton instance used by generated proxy code.</summary>
     public static Runtime Shared { get; } = new();
@@ -171,6 +171,49 @@ public sealed class Runtime
     /// </summary>
     public void RegisterClrType(string name, Type type)
         => ClrResolver.RegisterType(name, type);
+
+    // ── IHostedRuntime ────────────────────────────────────────────
+
+    /// <inheritdoc />
+    public void RegisterBinding(string name, Type type)
+        => RegisterClrType(name, type);
+
+    /// <summary>
+    /// The generic ObjectRT runtime has no assembly-level binding attribute
+    /// (bindings are registered per-type via <see cref="RegisterBinding"/>),
+    /// so this is a no-op. Contract's runtime overrides this to scan for
+    /// <c>[ClassBinding]</c> attributes.
+    /// </summary>
+    public void RegisterBindingAssembly(Assembly assembly)
+    {
+    }
+
+    /// <summary>
+    /// Scans the module's import metadata, loads it, and runs its entry point
+    /// (the static <c>Main</c> of the first type that has one). Mirrors the
+    /// load-then-run sequence the CLI uses so bundled executables behave
+    /// identically to <c>objectrt run</c>.
+    /// </summary>
+    public object? RunModule(ORBTModule module)
+    {
+        DllResolver.ScanModule(module, null);
+        NativeResolver.ScanModule(module, null);
+        LoadModule(module);
+
+        string? entry = null;
+        foreach (var t in module.Types)
+        {
+            var name = $"{module.Resolve(t.NameIndex)}.Main";
+            if (t.Methods.Any(m => module.Resolve(m.NameIndex) == "Main"))
+            {
+                entry = name;
+                break;
+            }
+        }
+        if (entry is null)
+            throw new InvalidOperationException("No entry point (class with static method Main) found.");
+        return CallMethod<object?>(entry);
+    }
 
     // ── Resolver chain ─────────────────────────────────────────────
 
@@ -411,6 +454,27 @@ public sealed class Runtime
         {
             resolved = true;
             return native.DynamicInvoke(args);
+        }
+
+        // Builtins are registered under signature-qualified keys (e.g.
+        // "System.Console.WriteLine(string)"), but a `callnative` operand
+        // carries only the bare name plus a separate param count. When the
+        // exact / param-count lookups miss, match a signature key whose name
+        // prefix is the bare name — if exactly one such builtin exists.
+        var prefix = qualifiedName + "(";
+        string? signatureMatch = null;
+        foreach (var key in _nativeMethods.Keys)
+        {
+            if (key.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                if (signatureMatch != null) { signatureMatch = null; break; } // ambiguous overloads: don't guess
+                signatureMatch = key;
+            }
+        }
+        if (signatureMatch != null)
+        {
+            resolved = true;
+            return _nativeMethods[signatureMatch].DynamicInvoke(args);
         }
 
         foreach (var resolver in _resolvers)
