@@ -352,6 +352,36 @@ public sealed class Runtime : IHostedRuntime
         t.Start();
     }
 
+    /// <summary>
+    /// Invokes a delegate value (the object handle produced by a lambda) on
+    /// this runtime, passing the given args, and returns its result. Runs on a
+    /// fresh <see cref="Interpreter"/> sharing the module state
+    /// (heap/statics/strings), so it is safe to call from host callbacks —
+    /// UI threads, timers, native bindings — whether or not the VM is
+    /// mid-execution (re-entrancy never resets the outer frames).
+    /// </summary>
+    public object? InvokeDelegate(object? handle, params object?[] args)
+    {
+        if (_compiled == null || _executor == null)
+            throw new InvalidOperationException("No module loaded.");
+        if (handle is not uint h)
+            throw new ArgumentException("Delegate handle required (a lambda value).");
+
+        var mod = _compiled;
+        var state = ((ExecutorBase)_executor).State;
+        var exec = new Interpreter(mod, state);
+        exec.NativeCallHandler = ResolveNativeCall;
+
+        var vmArgs = new Value[args.Length];
+        for (int i = 0; i < args.Length; i++)
+            vmArgs[i] = exec.MarshalValue(args[i]);
+
+        var result = exec.RunDelegate(h, vmArgs);
+        if (result.IsError)
+            throw new InvalidOperationException(result.Error.ToString());
+        return exec.ValueToObject(result.Value);
+    }
+
     // ── Module loading ─────────────────────────────────────────────
 
     /// <summary>Load an ObjectRT module from ObjectIL source code.</summary>

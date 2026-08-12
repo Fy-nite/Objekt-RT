@@ -439,6 +439,27 @@ public sealed class Interpreter : ExecutorBase
         Func<int, int, int> opI4, Func<long, long, long> opI8,
         Func<float, float, float> opR4, Func<double, double, double> opR8)
     {
+        // Nil participates as a typed zero: `nil + 1` stays int (like a C#
+        // static int field defaulting to 0), `nil + 1.5` stays double. Without
+        // this, the mixed-type fallback below would turn every uninitialized
+        // int counter into a double.
+        if (a.Tag == ValueTag.Nil && b.Tag != ValueTag.Nil)
+            a = b.Tag switch
+            {
+                ValueTag.I4 => Value.FromI4(0),
+                ValueTag.I8 => Value.FromI8(0),
+                ValueTag.R4 => Value.FromR4(0),
+                _ => Value.FromR8(0),
+            };
+        if (b.Tag == ValueTag.Nil && a.Tag != ValueTag.Nil)
+            b = a.Tag switch
+            {
+                ValueTag.I4 => Value.FromI4(0),
+                ValueTag.I8 => Value.FromI8(0),
+                ValueTag.R4 => Value.FromR4(0),
+                _ => Value.FromR8(0),
+            };
+
         if (a.Tag == ValueTag.I4 && b.Tag == ValueTag.I4) return Value.FromI4(opI4(a.I4, b.I4));
         if (a.Tag == ValueTag.I8 && b.Tag == ValueTag.I8) return Value.FromI8(opI8(a.I8, b.I8));
         if (a.Tag == ValueTag.R4 && b.Tag == ValueTag.R4) return Value.FromR4(opR4(a.R4, b.R4));
