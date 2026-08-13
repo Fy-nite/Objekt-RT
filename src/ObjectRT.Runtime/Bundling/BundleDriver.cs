@@ -235,6 +235,11 @@ public static class BundleDriver
             foreach (var dll in Directory.GetFiles(baseDir, "*.dll"))
                 File.Copy(dll, Path.Combine(outputDir, Path.GetFileName(dll)), overwrite: true);
 
+            // Native assets (runtimes/<rid>/native) can't be probed without a
+            // deps.json — P/Invoke must find them next to the host. Copy the
+            // current platform's natives to the output root.
+            CopyBindingNativeAssets(spec.BindingAssemblyPaths, outputDir, rids: null);
+
             // runtimeconfig.json (framework-dependent). Write the *minimal*
             // version for the target framework ("net10.0" → "10.0.0") plus
             // rollForward LatestMajor: the host rolls up to the nearest
@@ -282,9 +287,13 @@ public static class BundleDriver
                 File.Copy(dll, Path.Combine(libDir, Path.GetFileName(dll)), overwrite: true);
             File.WriteAllBytes(Path.Combine(workDir, "module.orbt"), orbtBytes);
 
+            // Native DLLs (libSkiaSharp etc.) are not managed assemblies — keep
+            // them out of the <Reference> list or the build breaks. They get
+            // shipped via the <None> glob below instead.
             var allLibDlls = Directory.GetFiles(libDir, "*.dll")
                 .Select(Path.GetFileName)
                 .Where(f => f is not null)
+                .Where(f => IsManagedDll(Path.Combine(libDir, f)))
                 .Cast<string>()
                 .ToList();
             var refsXml = string.Join("\n",
@@ -304,6 +313,7 @@ public static class BundleDriver
             {singleFile}  </PropertyGroup>
               <ItemGroup>
             {refsXml}
+                <None Include="lib\**\*.dll" CopyToPublishDirectory="PreserveNewest" />
                 <EmbeddedResource Include="module.orbt"><LogicalName>module.orbt</LogicalName></EmbeddedResource>
               </ItemGroup>
             </Project>
@@ -312,6 +322,10 @@ public static class BundleDriver
 
             foreach (var rid in spec.Rids)
             {
+                // Refresh this RID's native assets so the right arch is present
+                // (and wins any overwrite) in lib when this publish runs.
+                CopyBindingNativeAssets(spec.BindingAssemblyPaths, libDir, new[] { rid });
+
                 var output = Path.Combine(outDir, $"{name}-{rid}");
                 Directory.CreateDirectory(output);
                 if (verbose) Console.Error.WriteLine($"; Publishing {rid} → {output}");
@@ -511,6 +525,55 @@ public static class BundleDriver
             }
         }
         return result;
+    }
+
+    /// <summary>
+    /// Copies native assets (<c>runtimes/&lt;rid&gt;/native/*</c>) from the
+    /// binding assembly directories into <paramref name="outputDir"/>, flat at
+    /// the root. A bundle has no deps.json, so the runtime cannot probe
+    /// <c>runtimes/...</c> paths — P/Invoke must find the natives next to the
+    /// host. <paramref name="rids"/> null/empty copies only the current
+    /// platform's natives (framework-dependent bundles); pass explicit RIDs for
+    /// self-contained publishes.
+    /// </summary>
+    private static void CopyBindingNativeAssets(IReadOnlyList<string> bindingAssemblyPaths, string outputDir, IReadOnlyList<string>? rids)
+    {
+        var ridSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (rids != null)
+            foreach (var r in rids) ridSet.Add(r);
+        try { ridSet.Add(System.Runtime.InteropServices.RuntimeInformation.RuntimeIdentifier); } catch { }
+
+        foreach (var path in bindingAssemblyPaths)
+        {
+            var dir = Path.GetDirectoryName(Path.GetFullPath(path));
+            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) continue;
+            var runtimes = Path.Combine(dir, "runtimes");
+            if (!Directory.Exists(runtimes)) continue;
+
+            foreach (var rid in ridSet)
+            {
+                var native = Path.Combine(runtimes, rid, "native");
+                if (!Directory.Exists(native)) continue;
+                foreach (var file in Directory.GetFiles(native))
+                {
+                    var ext = Path.GetExtension(file).ToLowerInvariant();
+                    if (ext is not (".dll" or ".so" or ".dylib")) continue;
+                    try { File.Copy(file, Path.Combine(outputDir, Path.GetFileName(file)), overwrite: true); } catch { }
+                }
+            }
+        }
+    }
+
+    /// <summary>True when the file is a managed .NET assembly (as opposed to a native library).</summary>
+    private static bool IsManagedDll(string path)
+    {
+        try
+        {
+            System.Reflection.AssemblyName.GetAssemblyName(path);
+            return true;
+        }
+        catch (BadImageFormatException) { return false; }
+        catch (Exception) { return false; }
     }
 
     private static void Error(string msg) => Console.Error.WriteLine($"Error: {msg}");
