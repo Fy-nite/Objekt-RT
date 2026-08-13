@@ -25,11 +25,27 @@ public sealed class Interpreter : ExecutorBase
     private string _currentFuncName = "";
     private uint _currentPc;
     private bool _trace;
+    private long _maxSteps;          // 0 = unlimited
+    private long _stepsExecuted;
 
     public Interpreter(CompiledModule mod) : base(mod) { }
     public Interpreter(CompiledModule mod, ExecutorState? shared) : base(mod, shared) { }
 
     public bool Trace { get => _trace; set => _trace = value; }
+
+    /// <summary>
+    /// Optional instruction budget for this interpreter. When non-zero,
+    /// execution aborts with <see cref="VmErrorKind.StepBudgetExceeded"/> once
+    /// more than <see cref="MaxSteps"/> bytecode instructions have been
+    /// dispatched within a single top-level call (<c>RunFunction</c>). 0 (the
+    /// default) means unlimited and adds no overhead to the dispatch loop.
+    /// Useful for sandboxing untrusted content scripts.
+    /// </summary>
+    public long MaxSteps
+    {
+        get => _maxSteps;
+        set => _maxSteps = Math.Max(0, value);
+    }
 
     /// <summary>True when a VM function is currently executing on this interpreter.</summary>
     public bool IsExecuting => _frames.Count > 0;
@@ -50,6 +66,8 @@ public sealed class Interpreter : ExecutorBase
 
         var func = Mod.GetFunction(funcIdx);
         _currentFuncName = func.DebugName;
+
+        _stepsExecuted = 0;
 
         int localsLen = (int)(func.NumParams + func.NumLocals + 1);
         if (_localsScratch.Length < localsLen)
@@ -83,6 +101,9 @@ public sealed class Interpreter : ExecutorBase
 
             while (pc < codeSize)
             {
+                if (_maxSteps != 0 && ++_stepsExecuted > _maxSteps)
+                    return Err(VmErrorKind.StepBudgetExceeded,
+                        $"instruction budget exceeded ({_maxSteps} steps)");
                 _currentPc = pc; // instruction start — used for error reporting
                 ushort op = ReadOpcode(code, ref pc);
                 if (_trace || Environment.GetEnvironmentVariable("ORTRT_TRACE") == "1")

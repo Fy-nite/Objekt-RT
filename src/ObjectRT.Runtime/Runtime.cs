@@ -1,5 +1,6 @@
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Threading;
 using ObjectRT.Abstractions;
 using ObjectRT.Reader;
@@ -38,6 +39,16 @@ public sealed class Runtime : IHostedRuntime
 
     private CompiledModule? _compiled;
     private IExecutor? _executor;
+
+    /// <summary>
+    /// Instruction budget (VM steps) applied to every interpreter this runtime
+    /// creates, including spawned threads and delegate invocations. 0 (default)
+    /// means unlimited. Set before loading/running untrusted content scripts to
+    /// cap runaway loops. Propagated to fresh interpreters in
+    /// <see cref="SpawnThread"/>, <see cref="StartThread"/> and
+    /// <see cref="InvokeDelegate"/>.
+    /// </summary>
+    public long MaxSteps { get; set; }
 
     /// <summary>Explicitly registered native methods (fast path).</summary>
     private readonly Dictionary<string, Delegate> _nativeMethods = new(StringComparer.Ordinal);
@@ -306,6 +317,7 @@ public sealed class Runtime : IHostedRuntime
             {
                 var exec = new Interpreter(mod, state);
                 exec.NativeCallHandler = ResolveNativeCall;
+                exec.MaxSteps = MaxSteps;
                 var result = exec.RunDelegate(thread.DelegateHandle, Array.Empty<Value>());
                 if (result.IsError)
                     Console.Error.WriteLine($"; Thread error: {result.Error}");
@@ -339,6 +351,7 @@ public sealed class Runtime : IHostedRuntime
             {
                 var exec = new Interpreter(mod, state);
                 exec.NativeCallHandler = ResolveNativeCall;
+                exec.MaxSteps = MaxSteps;
                 var result = exec.RunDelegate(h, Array.Empty<Value>());
                 if (result.IsError)
                     Console.Error.WriteLine($"; Thread error: {result.Error}");
@@ -371,6 +384,7 @@ public sealed class Runtime : IHostedRuntime
         var state = ((ExecutorBase)_executor).State;
         var exec = new Interpreter(mod, state);
         exec.NativeCallHandler = ResolveNativeCall;
+        exec.MaxSteps = MaxSteps;
 
         var vmArgs = new Value[args.Length];
         for (int i = 0; i < args.Length; i++)
@@ -475,6 +489,92 @@ public sealed class Runtime : IHostedRuntime
         if (_compiled == null || _executor is not ExecutorBase ex) return;
         if (!_compiled.FieldMap.TryGetValue(qualifiedName, out var idx)) return;
         ex.StaticFields[(int)idx] = ex.MarshalValue(value);
+    }
+
+    /// <summary>
+    /// Allocates a VM object of the named type (as declared in the loaded
+    /// module) and returns its heap handle as a boxed <see cref="uint"/>. Pass
+    /// the handle back to <see cref="GetField"/> / <see cref="SetField"/> and
+    /// as arg[0] when calling instance methods. Returns null when nothing is
+    /// loaded or the type is unknown.
+    /// </summary>
+    public object? AllocateObject(string typeName)
+    {
+        if (_compiled == null || _executor is not ExecutorBase ex) return null;
+        int typeIdx = -1;
+        for (int i = 0; i < _compiled.Types.Count; i++)
+        {
+            if (_compiled.Types[i].DebugName == typeName) { typeIdx = i; break; }
+        }
+        if (typeIdx < 0) return null;
+        var type = _compiled.GetType((uint)typeIdx);
+        uint handle = (uint)ex.Heap.Count;
+        ex.Heap.Add(new byte[type.InstanceSize]);
+        return handle;
+    }
+
+    /// <summary>
+    /// Whether a field (by qualified name "Type.field") is static. Instance
+    /// fields need an object handle; static ones live in the static table.
+    /// </summary>
+    public bool IsStaticField(string qualifiedName)
+    {
+        if (LoadedModule == null) return false;
+        int dot = qualifiedName.LastIndexOf('.');
+        if (dot <= 0 || dot >= qualifiedName.Length - 1) return false;
+        string typeName = qualifiedName[..dot];
+        string fieldName = qualifiedName[(dot + 1)..];
+        foreach (var t in LoadedModule.Types)
+        {
+            if (LoadedModule.Resolve(t.NameIndex) != typeName) continue;
+            foreach (var f in t.Fields)
+            {
+                if (LoadedModule.Resolve(f.NameIndex) == fieldName)
+                    return f.IsStatic;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Reads a field by qualified name ("Type.field"). Static fields need no
+    /// instance (pass null); instance fields require the object handle returned
+    /// by <see cref="AllocateObject"/>. Returns null when nothing is loaded,
+    /// the field is unknown, or the instance handle is invalid.
+    /// </summary>
+    public object? GetField(string qualifiedName, object? instance = null)
+    {
+        if (_compiled == null || _executor is not ExecutorBase ex) return null;
+        if (!_compiled.FieldMap.TryGetValue(qualifiedName, out var idx)) return null;
+        if (IsStaticField(qualifiedName))
+            return ex.ValueToObject(ex.StaticFields[(int)idx]);
+        if (instance is not uint h || h >= ex.Heap.Count) return null;
+        var fld = _compiled.Fields[(int)idx];
+        if (fld.Offset + VmConstants.FieldSlotSize > ex.Heap[(int)h].Length) return null;
+        var val = MemoryMarshal.Read<Value>(ex.Heap[(int)h].AsSpan((int)fld.Offset, (int)VmConstants.FieldSlotSize));
+        return ex.ValueToObject(val);
+    }
+
+    /// <summary>
+    /// Writes a field by qualified name ("Type.field"). Static fields need no
+    /// instance (pass null); instance fields require the object handle returned
+    /// by <see cref="AllocateObject"/>. No-op when nothing is loaded, the field
+    /// is unknown, or the instance handle is invalid.
+    /// </summary>
+    public void SetField(string qualifiedName, object? value, object? instance = null)
+    {
+        if (_compiled == null || _executor is not ExecutorBase ex) return;
+        if (!_compiled.FieldMap.TryGetValue(qualifiedName, out var idx)) return;
+        var marshaled = ex.MarshalValue(value);
+        if (IsStaticField(qualifiedName))
+        {
+            ex.StaticFields[(int)idx] = marshaled;
+            return;
+        }
+        if (instance is not uint h || h >= ex.Heap.Count) return;
+        var fld = _compiled.Fields[(int)idx];
+        if (fld.Offset + VmConstants.FieldSlotSize > ex.Heap[(int)h].Length) return;
+        MemoryMarshal.Write(ex.Heap[(int)h].AsSpan((int)fld.Offset, (int)VmConstants.FieldSlotSize), in marshaled);
     }
 
     // ── Native method registration ─────────────────────────────────
@@ -631,6 +731,7 @@ public sealed class Runtime : IHostedRuntime
             JitMode.Reflection => new ReflectionJit(mod),
             _ => new Interpreter(mod),
         };
+        if (vm is Interpreter ip) ip.MaxSteps = MaxSteps;
         AttachHostHandlers(vm);
         return vm;
     }
@@ -656,6 +757,7 @@ public sealed class Runtime : IHostedRuntime
         {
             vm = new Interpreter(_compiled, active.State);
             AttachHostHandlers(vm);
+            if (vm is Interpreter ip) ip.MaxSteps = MaxSteps;
         }
         else
         {
