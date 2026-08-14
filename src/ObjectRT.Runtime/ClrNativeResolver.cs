@@ -145,6 +145,10 @@ public sealed class ClrNativeResolver : INativeResolver
                         args[i] = (double)l5;
                     else if (target == typeof(float) && v is int i6)
                         args[i] = (float)i6;
+                    else if (target == typeof(float) && v is double d6)
+                        args[i] = (float)d6;
+                    else if (target == typeof(double) && v is float f6)
+                        args[i] = (double)f6;
                     else if (target == typeof(long) && v is int i7)
                         args[i] = (long)i7;
                 }
