@@ -92,9 +92,19 @@ Program
 System.String
 List`1
 List<DebugInfo>
+Box<int32>
+Pair<int32, string>
 Item.value
 IO.Println
 ```
+
+#note[Generic *definitions* (`@Generic(T)` on a class) are materialized at
+runtime: the VM clones the definition per concrete instantiation, substituting
+the type parameters and the class's own name in every type position on first
+use. Multi-argument names like `Pair<int32, string>` contain a comma, which
+splits the identifier in the tokenizer — parsers must join tokens while angle
+brackets are unbalanced. See `docs/GENERICS_MATERIALIZATION.md` for the full
+protocol.]
 
 == Keywords
 

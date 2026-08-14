@@ -370,11 +370,14 @@ public class ObjectILParser
 
     /// <summary>
     /// Reads a type name: an identifier optionally followed by [] array suffixes
-    /// (e.g. "int", "int[]", "string[][]"). Function types are not supported yet.
+    /// (e.g. "int", "int[]", "string[][]"). Materialized generic names with
+    /// commas inside angle brackets (Pair&lt;int32, string&gt;) split across
+    /// tokens, so the qualified-name joiner is used first. Function types are
+    /// not supported yet.
     /// </summary>
     private string ReadTypeName()
     {
-        var name = ExpectIdentifier().Text;
+        var name = ReadQualifiedOperand().Text;
         while (_tokenizer.PeekToken().Kind == TokenKind.OpenBracket)
         {
             _tokenizer.AdvanceToken();
@@ -740,7 +743,9 @@ public class ObjectILParser
                 && _tokenizer.PeekToken().Kind != TokenKind.OpenBrace
                 && _tokenizer.PeekToken().Line == mnLine)
             {
-                nameIdx = mod.StringPool.Add(_tokenizer.AdvanceToken().Text);
+                // ReadQualifiedOperand joins multi-token generic names
+                // (Pair<int32, string>..ctor), keeping the ", " separator.
+                nameIdx = mod.StringPool.Add(ReadQualifiedOperand().Text);
 
                 if (_tokenizer.PeekToken().Kind == TokenKind.OpenParen)
                 {
@@ -778,7 +783,7 @@ public class ObjectILParser
             && _tokenizer.PeekToken().Kind != TokenKind.OpenBrace
             && _tokenizer.PeekToken().Line == mnLine)
         {
-            var operand = _tokenizer.AdvanceToken();
+            var operand = ReadQualifiedOperand();
             // Field references are qualified as "Type::field" in the text IR —
             // join the three tokens so the operand is the full field reference.
             // ModuleCompiler keys fields as "Type.field" (dot), so normalize.
@@ -808,6 +813,42 @@ public class ObjectILParser
         }
 
         method.InstrCount++;
+    }
+
+    /// <summary>
+    /// Reads one operand token, joining additional tokens while angle brackets
+    /// are unbalanced. Materialized generic type names contain commas inside
+    /// their angle brackets (<c>Pair&lt;int32, string&gt;</c>), and the
+    /// tokenizer stops identifiers at <c>,</c>, so the name splits across
+    /// tokens (<c>Pair&lt;int32</c> <c>,</c> <c>string&gt;.ctor</c>). Joining
+    /// with the comma separator (", ") reconstructs the exact wire name the
+    /// compiler emitted.
+    /// </summary>
+    private Token ReadQualifiedOperand()
+    {
+        var t = _tokenizer.AdvanceToken();
+        int angleDepth = CountAngles(t.Text);
+        while (angleDepth > 0
+               && _tokenizer.PeekToken().Kind is not (TokenKind.Eof or TokenKind.CloseBrace)
+               && _tokenizer.PeekToken().Line == t.Line)
+        {
+            var next = _tokenizer.AdvanceToken();
+            string sep = next.Text == "," ? ", " : "";
+            t = new Token(t.Kind, t.Text + sep + next.Text, t.Line, t.Col);
+            angleDepth += CountAngles(next.Text);
+        }
+        return t;
+    }
+
+    private static int CountAngles(string s)
+    {
+        int d = 0;
+        foreach (var ch in s)
+        {
+            if (ch == '<') d++;
+            else if (ch == '>') d--;
+        }
+        return d;
     }
 
     // ── Operand encoding ────────────────────────────────────────────
