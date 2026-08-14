@@ -30,6 +30,7 @@ public enum VmErrorKind
     FunctionNotFound,
     RuntimeError,
     InternalError,
+    StepBudgetExceeded,
 }
 
 public static class VmErrorKindExtensions
@@ -59,6 +60,7 @@ public static class VmErrorKindExtensions
         VmErrorKind.FunctionNotFound      => "FunctionNotFound",
         VmErrorKind.RuntimeError          => "RuntimeError",
         VmErrorKind.InternalError         => "InternalError",
+        VmErrorKind.StepBudgetExceeded    => "StepBudgetExceeded",
         _                                 => "Unknown",
     };
 }

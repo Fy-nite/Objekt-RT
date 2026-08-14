@@ -25,11 +25,27 @@ public sealed class Interpreter : ExecutorBase
     private string _currentFuncName = "";
     private uint _currentPc;
     private bool _trace;
+    private long _maxSteps;          // 0 = unlimited
+    private long _stepsExecuted;
 
     public Interpreter(CompiledModule mod) : base(mod) { }
     public Interpreter(CompiledModule mod, ExecutorState? shared) : base(mod, shared) { }
 
     public bool Trace { get => _trace; set => _trace = value; }
+
+    /// <summary>
+    /// Optional instruction budget for this interpreter. When non-zero,
+    /// execution aborts with <see cref="VmErrorKind.StepBudgetExceeded"/> once
+    /// more than <see cref="MaxSteps"/> bytecode instructions have been
+    /// dispatched within a single top-level call (<c>RunFunction</c>). 0 (the
+    /// default) means unlimited and adds no overhead to the dispatch loop.
+    /// Useful for sandboxing untrusted content scripts.
+    /// </summary>
+    public long MaxSteps
+    {
+        get => _maxSteps;
+        set => _maxSteps = Math.Max(0, value);
+    }
 
     /// <summary>True when a VM function is currently executing on this interpreter.</summary>
     public bool IsExecuting => _frames.Count > 0;
@@ -50,6 +66,8 @@ public sealed class Interpreter : ExecutorBase
 
         var func = Mod.GetFunction(funcIdx);
         _currentFuncName = func.DebugName;
+
+        _stepsExecuted = 0;
 
         int localsLen = (int)(func.NumParams + func.NumLocals + 1);
         if (_localsScratch.Length < localsLen)
@@ -83,6 +101,9 @@ public sealed class Interpreter : ExecutorBase
 
             while (pc < codeSize)
             {
+                if (_maxSteps != 0 && ++_stepsExecuted > _maxSteps)
+                    return Err(VmErrorKind.StepBudgetExceeded,
+                        $"instruction budget exceeded ({_maxSteps} steps)");
                 _currentPc = pc; // instruction start — used for error reporting
                 ushort op = ReadOpcode(code, ref pc);
                 if (_trace || Environment.GetEnvironmentVariable("ORTRT_TRACE") == "1")
@@ -439,6 +460,27 @@ public sealed class Interpreter : ExecutorBase
         Func<int, int, int> opI4, Func<long, long, long> opI8,
         Func<float, float, float> opR4, Func<double, double, double> opR8)
     {
+        // Nil participates as a typed zero: `nil + 1` stays int (like a C#
+        // static int field defaulting to 0), `nil + 1.5` stays double. Without
+        // this, the mixed-type fallback below would turn every uninitialized
+        // int counter into a double.
+        if (a.Tag == ValueTag.Nil && b.Tag != ValueTag.Nil)
+            a = b.Tag switch
+            {
+                ValueTag.I4 => Value.FromI4(0),
+                ValueTag.I8 => Value.FromI8(0),
+                ValueTag.R4 => Value.FromR4(0),
+                _ => Value.FromR8(0),
+            };
+        if (b.Tag == ValueTag.Nil && a.Tag != ValueTag.Nil)
+            b = a.Tag switch
+            {
+                ValueTag.I4 => Value.FromI4(0),
+                ValueTag.I8 => Value.FromI8(0),
+                ValueTag.R4 => Value.FromR4(0),
+                _ => Value.FromR8(0),
+            };
+
         if (a.Tag == ValueTag.I4 && b.Tag == ValueTag.I4) return Value.FromI4(opI4(a.I4, b.I4));
         if (a.Tag == ValueTag.I8 && b.Tag == ValueTag.I8) return Value.FromI8(opI8(a.I8, b.I8));
         if (a.Tag == ValueTag.R4 && b.Tag == ValueTag.R4) return Value.FromR4(opR4(a.R4, b.R4));
