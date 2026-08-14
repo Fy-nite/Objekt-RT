@@ -47,6 +47,12 @@ public class ModuleCompiler
     {
         var mod = new CompiledModule();
 
+        // Materialize generic instantiations (Box<int>) from their @Generic
+        // definitions, lazily, at first use. This mutates src: concrete
+        // specialized classes are appended before the resolution tables are
+        // built, so everything below treats them as ordinary types.
+        MaterializeReferencedGenerics(src);
+
         BuildResolutionTables(src);
 
         // 2. Compile types
@@ -201,6 +207,352 @@ public class ModuleCompiler
             }
         }
     }
+
+    // ── Generic materialization (@Generic, lazy, at first use) ───────
+    //
+    // A generic contract (contract Box<T>) is emitted as a "definition": the
+    // class keeps its name, carries an @Generic(T, ...) attribute listing its
+    // type parameters, and its body references those parameters literally
+    // (field value: T, method get() -> T). Call sites reference concrete
+    // instantiations (newobj Box<int>, call Box<int>.get() -> int).
+    //
+    // At compile time we materialize each referenced instantiation by cloning
+    // the definition and substituting the type parameters (and the class's own
+    // name) in every type position, re-interning the resulting strings. This
+    // happens lazily — only instantiations the code actually references are
+    // materialized — and mirrors how the compiler itself resolves the
+    // signatures: Box<int> becomes a real, specialized class with its own
+    // fields, methods, and function-table entries.
+
+    /// <summary>A @Generic definition: the template TypeRecord plus its type-parameter names.</summary>
+    private sealed class GenericDef
+    {
+        public TypeRecord Type;
+        public string[] Params;
+        public GenericDef(TypeRecord type, string[] pars)
+        {
+            Type = type;
+            Params = pars;
+        }
+    }
+
+    /// <summary>Names already materialized in this compilation (or present in the module).</summary>
+    private readonly HashSet<string> _materializedNames = new(StringComparer.Ordinal);
+
+    private void MaterializeReferencedGenerics(ORBTModule src)
+    {
+        _materializedNames.Clear();
+
+        // Collect @Generic definitions (the template types).
+        var defs = new Dictionary<string, GenericDef>(StringComparer.Ordinal);
+        foreach (var t in src.Types)
+        {
+            if (TryGetGenericParams(src, t, out var pars))
+                defs[src.Resolve(t.NameIndex)] = new GenericDef(t, pars);
+        }
+        if (defs.Count == 0) return;
+
+        // Worklist of concrete instantiations to materialize.
+        var queue = new Queue<(GenericDef Def, string Name)>();
+        foreach (var t in src.Types)
+            ScanForGenericRefs(src, t, defs, queue);
+
+        while (queue.Count > 0)
+        {
+            var (def, name) = queue.Dequeue();
+            if (_materializedNames.Contains(name)) continue;
+            if (src.Types.Any(t => src.Resolve(t.NameIndex) == name)) continue; // already present
+            _materializedNames.Add(name);
+            var clone = Materialize(src, def, name);
+            // The clone may reference further instantiations (nested generics).
+            ScanForGenericRefs(src, clone, defs, queue);
+        }
+    }
+
+    /// <summary>Reads the @Generic(T, U, ...) attribute args, if present.</summary>
+    private static bool TryGetGenericParams(ORBTModule src, TypeRecord t, out string[] pars)
+    {
+        foreach (var attr in t.Attributes)
+        {
+            if (src.Resolve(attr.NameIndex).Equals("Generic", StringComparison.Ordinal))
+            {
+                pars = attr.ArgIndices.Select(src.Resolve).ToArray();
+                return true;
+            }
+        }
+        pars = Array.Empty<string>();
+        return false;
+    }
+
+    /// <summary>Scans a type's methods for references to generic instantiations and queues them.</summary>
+    private static void ScanForGenericRefs(ORBTModule src, TypeRecord t, Dictionary<string, GenericDef> defs, Queue<(GenericDef, string)> queue)
+    {
+        foreach (var m in t.Methods)
+        {
+            var instrs = EnsureDecoded(src, m);
+            foreach (var instr in instrs)
+            {
+                switch (instr.Operand)
+                {
+                    // newobj Box<int> / newarr element types.
+                    case OperandString os when instr.Opcode is Opcode.Newobj or Opcode.Newarr:
+                        EnqueueGenericRef(src, defs, src.Resolve(os.StringIndex), queue);
+                        break;
+                    // castclass / isinst / conv Box<int>.
+                    case OperandTypeRef ot:
+                        EnqueueGenericRef(src, defs, src.Resolve(ot.StringIndex), queue);
+                        break;
+                    // ldfld Box<int>::value — the declaring type precedes "::".
+                    case OperandFieldRef of:
+                        EnqueueGenericRef(src, defs, DeclaringTypeOf(src.Resolve(of.StringIndex), true), queue);
+                        break;
+                    // call Box<int>.get / Box<int>..ctor — the declaring type precedes ".".
+                    case OperandNativeCall nc:
+                        EnqueueGenericRef(src, defs, DeclaringTypeOf(src.Resolve(nc.StringIndex), false), queue);
+                        break;
+                }
+            }
+        }
+    }
+
+    /// <summary>Queues a materialization when the reference names a known generic instantiation.</summary>
+    private static void EnqueueGenericRef(ORBTModule src, Dictionary<string, GenericDef> defs, string typeName, Queue<(GenericDef, string)> queue)
+    {
+        if (!TrySplitGeneric(typeName, out var baseName, out var args)) return;
+        if (!defs.TryGetValue(baseName, out var def)) return;
+        if (args.Length != def.Params.Length) return;   // malformed — normal resolution will error
+        queue.Enqueue((def, typeName));
+    }
+
+    /// <summary>Splits "Box&lt;int&gt;" into ("Box", ["int"]). Args may carry [] suffixes.</summary>
+    private static bool TrySplitGeneric(string s, out string baseName, out string[] args)
+    {
+        baseName = s;
+        args = Array.Empty<string>();
+        int lt = s.IndexOf('<');
+        if (lt <= 0 || s[^1] != '>') return false;
+        baseName = s[..lt];
+        args = SplitTopLevelArgs(s[(lt + 1)..^1]);
+        return true;
+    }
+
+    private static string[] SplitTopLevelArgs(string inner)
+    {
+        var parts = new List<string>();
+        var sb = new System.Text.StringBuilder();
+        int depth = 0;
+        foreach (var ch in inner)
+        {
+            switch (ch)
+            {
+                case '<': depth++; break;
+                case '>': depth = Math.Max(0, depth - 1); break;
+                case ',' when depth == 0:
+                    parts.Add(sb.ToString().Trim());
+                    sb.Clear();
+                    continue;
+            }
+            sb.Append(ch);
+        }
+        if (sb.Length > 0) parts.Add(sb.ToString().Trim());
+        return parts.Where(p => p.Length > 0).ToArray();
+    }
+
+    /// <summary>The declaring type of a qualified reference: "Box::field" or "Box.method" / "Box..ctor".</summary>
+    private static string DeclaringTypeOf(string refStr, bool fieldRef)
+    {
+        if (fieldRef)
+        {
+            int sc = refStr.IndexOf("::", StringComparison.Ordinal);
+            if (sc > 0) return refStr[..sc];
+        }
+        int idx = refStr.IndexOf('.');
+        return idx > 0 ? refStr[..idx] : refStr;
+    }
+
+    /// <summary>Decodes a method's raw bytecode into Instructions, caching on the record.</summary>
+    private static List<Instruction> EnsureDecoded(ORBTModule src, MethodRecord m)
+    {
+        if (m.Instructions.Count == 0 && m.RawInstructionData.Length > 0)
+        {
+            try
+            {
+                m.Instructions = DecodeRawBytecode(m.RawInstructionData, src);
+            }
+            catch
+            {
+                // Leave empty; the compile loop will fall back to passthrough.
+            }
+        }
+        return m.Instructions;
+    }
+
+    /// <summary>
+    /// Clones a @Generic definition for the concrete instantiation
+    /// <paramref name="name"/> (e.g. "Box&lt;int&gt;"), substituting the type
+    /// parameters (and the class's own name) in every type position, and
+    /// appends the specialized class to the module.
+    /// </summary>
+    private TypeRecord Materialize(ORBTModule src, GenericDef def, string name)
+    {
+        string defName = src.Resolve(def.Type.NameIndex);
+        if (!TrySplitGeneric(name, out _, out var args) || args.Length != def.Params.Length)
+            return def.Type;   // malformed instantiation — leave the module untouched
+
+        var paramMap = new Dictionary<string, string>(StringComparer.Ordinal);
+        for (int i = 0; i < def.Params.Length; i++)
+            paramMap[def.Params[i]] = args[i];
+
+        string Substitute(string s) => SubstituteTypeText(s, paramMap, defName, name);
+
+        var clone = new TypeRecord
+        {
+            Kind = def.Type.Kind,
+            Access = def.Type.Access,
+            Flags = def.Type.Flags,
+            BaseTypeIndex = def.Type.BaseTypeIndex,
+            NamespaceIndex = def.Type.NamespaceIndex,
+            NameIndex = src.StringPool.Add(name),
+        };
+        clone.InterfaceIndices.AddRange(def.Type.InterfaceIndices);
+        clone.InterfaceCount = def.Type.InterfaceCount;
+
+        // Copy attributes except @Generic — the clone is a concrete class, not
+        // a template (otherwise it would be treated as a definition again).
+        foreach (var attr in def.Type.Attributes)
+        {
+            if (src.Resolve(attr.NameIndex).Equals("Generic", StringComparison.Ordinal)) continue;
+            clone.Attributes.Add(attr);
+        }
+
+        foreach (var f in def.Type.Fields)
+        {
+            clone.Fields.Add(new FieldRecord(
+                f.NameIndex,
+                src.StringPool.Add(Substitute(src.Resolve(f.TypeIndex))),
+                f.IsStatic));
+            clone.FieldCount++;
+        }
+
+        foreach (var m in def.Type.Methods)
+        {
+            var cm = new MethodRecord
+            {
+                Access = m.Access,
+                Flags = m.Flags,
+                NameIndex = m.NameIndex,
+                ParamCount = m.ParamCount,
+                LocalCount = m.LocalCount,
+                LabelCount = m.LabelCount,
+                SignatureIndex = src.StringPool.Add(Substitute(src.Resolve(m.SignatureIndex))),
+            };
+            foreach (var p in m.Params)
+                cm.Params.Add(new ParameterRecord(p.NameIndex, src.StringPool.Add(Substitute(src.Resolve(p.TypeIndex)))));
+            foreach (var l in m.Locals)
+                cm.Locals.Add(new LocalRecord(l.NameIndex, src.StringPool.Add(Substitute(src.Resolve(l.TypeIndex)))));
+            cm.Attributes.AddRange(m.Attributes);
+            cm.LineMappings.AddRange(m.LineMappings);
+
+            // Instructions: substitute type-bearing operand strings (field refs,
+            // call refs, newobj/castclass/isinst type refs). Literal strings
+            // (ldstr) and indices are left untouched.
+            foreach (var inst in EnsureDecoded(src, m))
+            {
+                Operand newOperand = inst.Operand switch
+                {
+                    OperandFieldRef of => new OperandFieldRef(src.StringPool.Add(Substitute(src.Resolve(of.StringIndex)))),
+                    OperandNativeCall nc => new OperandNativeCall(src.StringPool.Add(Substitute(src.Resolve(nc.StringIndex))), nc.ParamCount),
+                    OperandTypeRef ot => new OperandTypeRef(src.StringPool.Add(Substitute(src.Resolve(ot.StringIndex)))),
+                    OperandString os when inst.Opcode is Opcode.Newobj or Opcode.Newarr
+                        => new OperandString(src.StringPool.Add(Substitute(src.Resolve(os.StringIndex)))),
+                    _ => inst.Operand,
+                };
+                cm.Instructions.Add(inst with { Operand = newOperand });
+            }
+
+            clone.Methods.Add(cm);
+            clone.MethodCount++;
+        }
+
+        src.Types.Add(clone);
+        return clone;
+    }
+
+    /// <summary>
+    /// String-level type substitution for a materialized clone: type parameters
+    /// (word-boundary aware) and the definition's own name (when it appears as a
+    /// qualified declaring type: "Box::field", "Box.method", or exactly "Box").
+    /// </summary>
+    private static string SubstituteTypeText(string s, IReadOnlyDictionary<string, string> paramMap, string defName, string materializedName)
+    {
+        foreach (var (param, arg) in paramMap)
+            s = ReplaceBoundary(s, param, arg);
+        s = ReplaceQualified(s, defName, materializedName);
+        return s;
+    }
+
+    /// <summary>Replaces <paramref name="from"/> with <paramref name="to"/> when not adjacent to a name character.</summary>
+    private static string ReplaceBoundary(string s, string from, string to)
+    {
+        if (from.Length == 0 || s.Length < from.Length) return s;
+        var sb = new System.Text.StringBuilder(s.Length + 8);
+        int i = 0;
+        while (i < s.Length)
+        {
+            int idx = s.IndexOf(from, i, StringComparison.Ordinal);
+            if (idx < 0) { sb.Append(s, i, s.Length - i); break; }
+            bool leftOk = idx == 0 || !IsNameChar(s[idx - 1]);
+            int end = idx + from.Length;
+            bool rightOk = end == s.Length || !IsNameChar(s[end]);
+            if (leftOk && rightOk)
+            {
+                sb.Append(s, i, idx - i);
+                sb.Append(to);
+                i = end;
+            }
+            else
+            {
+                sb.Append(s, i, end - i);
+                i = end;
+            }
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>Replaces the definition name when it appears as a qualified declaring type.</summary>
+    private static string ReplaceQualified(string s, string defName, string materializedName)
+    {
+        if (defName.Length == 0) return s;
+        var sb = new System.Text.StringBuilder(s.Length + 8);
+        int i = 0;
+        while (i < s.Length)
+        {
+            int idx = s.IndexOf(defName, i, StringComparison.Ordinal);
+            if (idx < 0) { sb.Append(s, i, s.Length - i); break; }
+            int end = idx + defName.Length;
+            // Only replace when followed by '.', ':', or end-of-string — so
+            // "Box" inside "Box<int>" (already materialized) is left alone.
+            bool followed = end < s.Length
+                ? s[end] == '.' || s[end] == ':'
+                : true;
+            bool leftOk = idx == 0 || !IsNameChar(s[idx - 1]);
+            if (followed && leftOk)
+            {
+                sb.Append(s, i, idx - i);
+                sb.Append(materializedName);
+                i = end;
+            }
+            else
+            {
+                sb.Append(s, i, end - i);
+                i = end;
+            }
+        }
+        return sb.ToString();
+    }
+
+    private static bool IsNameChar(char c)
+        => char.IsLetterOrDigit(c) || c == '_' || c == '`';
 
     // ── Name helpers ───────────────────────────────────────────────
 

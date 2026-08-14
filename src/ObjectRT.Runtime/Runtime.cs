@@ -364,6 +364,7 @@ public sealed class Runtime : IHostedRuntime
     /// <summary>Load an ObjectRT module from an .oil file.</summary>
     public void LoadModuleFile(string path)
     {
+        DllImportResolver.AddSearchDirectory(Path.GetDirectoryName(path));
         var module = OilFileReader.ParseFile(path);
         LoadModule(module);
     }
@@ -376,6 +377,9 @@ public sealed class Runtime : IHostedRuntime
 
         // Strip placeholder bodies from @DllImport classes so the interpreter
         // falls through to the DllImportResolver instead of executing the stub.
+        // The .orbt reader decodes raw bytes into Instructions, so overwriting
+        // RawInstructionData alone is ignored by VmCompiler (it re-encodes the
+        // decoded list when it is non-empty) — clear both.
         foreach (var type in module.Types)
         {
             bool isDllImport = type.Attributes.Any(a =>
@@ -383,7 +387,10 @@ public sealed class Runtime : IHostedRuntime
             if (isDllImport)
             {
                 foreach (var m in type.Methods)
+                {
+                    m.Instructions.Clear();
                     m.RawInstructionData = new byte[] { 0x18 }; // single "ret"
+                }
             }
         }
 

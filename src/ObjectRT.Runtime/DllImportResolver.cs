@@ -28,7 +28,9 @@ namespace ObjectRT.Runtime;
 ///
 /// The class body is stripped (only signatures matter). Method signatures
 /// map directly to P/Invoke: <c>int32 → int</c>, <c>string → string</c>
-/// (auto-marshaled as LPWStr when CharSet=Unicode), <c>float32 → float</c>, etc.
+/// (auto-marshaled as <see cref="UnmanagedType.LPUTF8Str"/> — UTF-8 bytes —
+/// which is what modern C libraries like raylib expect), <c>float32 → float</c>,
+/// etc.
 /// </summary>
 public sealed class DllImportResolver : INativeResolver
 {
@@ -91,6 +93,27 @@ public sealed class DllImportResolver : INativeResolver
     /// </summary>
     public static string? CacheDir { get; set; }
 
+    /// <summary>
+    /// Additional directories probed by generated bridges for native
+    /// libraries, on top of the current working directory and the app base.
+    /// The module loader registers the directory of any module file it loads,
+    /// so DLLs sitting next to a compiled module (e.g. <c>bin\raylib.dll</c>)
+    /// are found even though CLR P/Invoke probing does not search CWD.
+    /// </summary>
+    public static readonly ConcurrentBag<string> ExtraSearchDirectories = new();
+
+    /// <summary>Registers an extra directory probed for native libraries by generated bridges.</summary>
+    public static void AddSearchDirectory(string? dir)
+    {
+        if (string.IsNullOrEmpty(dir)) return;
+        try
+        {
+            if (Directory.Exists(dir))
+                ExtraSearchDirectories.Add(Path.GetFullPath(dir));
+        }
+        catch { /* unregisterable dir — ignore */ }
+    }
+
     // ── Registration ────────────────────────────────────────────
 
     /// <summary>
@@ -140,8 +163,12 @@ public sealed class DllImportResolver : INativeResolver
                     var pname = mod.Resolve(p.NameIndex);
                     var ptype = mod.Resolve(p.TypeIndex);
                     var cst = MapType(ptype);
+                    // Modern C libraries (raylib, SDL, ...) take `const char*`
+                    // as UTF-8. LPWStr would pass UTF-16 bytes, which a C
+                    // string reader truncates at the first NUL byte (the
+                    // classic "H" instead of "Hello world" bug).
                     var attrs = ptype.Equals("string", StringComparison.OrdinalIgnoreCase)
-                        ? "[MarshalAs(UnmanagedType.LPWStr)]" : "";
+                        ? "[MarshalAs(UnmanagedType.LPUTF8Str)]" : "";
                     mi.Params.Add((pname, cst, attrs));
                 }
 
@@ -220,11 +247,57 @@ public sealed class DllImportResolver : INativeResolver
         sb.AppendLine("using System.Runtime.InteropServices;");
         sb.AppendLine();
 
-        int classIdx = 0;
+        // Native library search directories: CWD, app base, and any
+        // directories registered by the host (e.g. the module's own
+        // directory, where DLLs are usually dropped).
+        var searchDirs = new List<string>();
+        void AddSearchDir(string? d)
+        {
+            if (string.IsNullOrEmpty(d)) return;
+            try
+            {
+                var full = Path.GetFullPath(d);
+                if (!searchDirs.Contains(full, StringComparer.OrdinalIgnoreCase))
+                    searchDirs.Add(full);
+            }
+            catch { }
+        }
+        AddSearchDir(Environment.CurrentDirectory);
+        AddSearchDir(AppContext.BaseDirectory);
+        foreach (var d in ExtraSearchDirectories) AddSearchDir(d);
+
+        if (searchDirs.Count > 0)
+        {
+            sb.AppendLine("internal static class __dll_search");
+            sb.AppendLine("{");
+            sb.Append("    internal static readonly string[] Directories = new[] { ");
+            sb.Append(string.Join(", ", searchDirs.Select(d => $"@\"{d.Replace("\"", "\"\"")}\"")));
+            sb.AppendLine(" };");
+            sb.AppendLine("    internal static System.IntPtr Resolve(string libraryName, System.Reflection.Assembly assembly, System.Runtime.InteropServices.DllImportSearchPath? searchPath)");
+            sb.AppendLine("    {");
+            sb.AppendLine("        var baseName = libraryName.EndsWith(\".dll\", StringComparison.OrdinalIgnoreCase) ? libraryName : libraryName + \".dll\";");
+            sb.AppendLine("        foreach (var dir in Directories)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            var candidate = System.IO.Path.Combine(dir, baseName);");
+            sb.AppendLine("            if (System.IO.File.Exists(candidate) && System.Runtime.InteropServices.NativeLibrary.TryLoad(candidate, out var handle))");
+            sb.AppendLine("                return handle;");
+            sb.AppendLine("        }");
+            sb.AppendLine("        return System.IntPtr.Zero;");
+            sb.AppendLine("    }");
+            sb.AppendLine("}");
+            sb.AppendLine();
+        }
+
         foreach (var (className, info) in _imports)
         {
-            var safeClass = $"__dll_{className}";
+            var safeClass = $"__dll_{BridgeClassName(className)}";
             sb.AppendLine($"public static class {safeClass} {{");
+
+            if (searchDirs.Count > 0)
+            {
+                sb.AppendLine("    [System.Runtime.CompilerServices.ModuleInitializer]");
+                sb.AppendLine($"    internal static void __register_dll() => System.Runtime.InteropServices.NativeLibrary.SetDllImportResolver(typeof({safeClass}).Assembly, __dll_search.Resolve);");
+            }
 
             // P/Invoke declarations
             foreach (var mi in info.Methods)
@@ -277,8 +350,6 @@ public sealed class DllImportResolver : INativeResolver
 
             sb.AppendLine("}");
             sb.AppendLine();
-
-            classIdx++;
         }
 
         var source = sb.ToString();
@@ -334,7 +405,7 @@ public sealed class DllImportResolver : INativeResolver
         // ── Extract delegates ────────────────────────────────────
         foreach (var (className, info) in _imports)
         {
-            var safeClass = $"__dll_{className}";
+            var safeClass = $"__dll_{BridgeClassName(className)}";
             var type = asm.GetType(safeClass);
             if (type == null) continue;
 
@@ -387,6 +458,25 @@ public sealed class DllImportResolver : INativeResolver
     }
 
     // ── Helpers ─────────────────────────────────────────────────
+
+    /// <summary>
+    /// Converts a module type name — which may be namespace-qualified, e.g.
+    /// "Raylib.Raylib" — into a valid C# identifier for the generated bridge
+    /// class. Dots and other non-identifier characters become '_'; a short
+    /// stable hash of the original name is appended whenever a replacement was
+    /// needed, so distinct names can never collide (e.g. "A.B" vs "A_B").
+    /// </summary>
+    private static string BridgeClassName(string className)
+    {
+        var sb = new StringBuilder(className.Length + 10);
+        foreach (var c in className)
+            sb.Append(char.IsLetterOrDigit(c) || c == '_' ? c : '_');
+        var safe = sb.ToString();
+        if (safe == className) return safe;
+        var hash = Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(className)));
+        return $"{safe}_{hash[..8].ToLowerInvariant()}";
+    }
 
     private static string Escape(string s) => s.Replace("\\", "\\\\").Replace("\"", "\\\"");
 
