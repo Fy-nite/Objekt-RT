@@ -195,6 +195,7 @@ public sealed class Interpreter : ExecutorBase
                         ushort si = ReadU16(code, ref pc);
                         ushort argc = ReadU16(code, ref pc);
                         string name = Mod.GetString(si);
+                        CompiledFunction? nativeStub = null;
 
                         // Delegate dispatch: `callvirt Delegate.Invoke` pops a
                         // receiver (a Delegate object) plus argc args, reads the
@@ -243,7 +244,7 @@ public sealed class Interpreter : ExecutorBase
                             {
                                 var callee = Mod.GetFunction(cfi);
                                 // Empty or single-ret body (e.g. @DllImport placeholder) — fall through to native.
-                                if (callee.Code.Length <= 2) { /* fall through */ }
+                                if (callee.Code.Length <= 2) { nativeStub = callee; /* fall through */ }
                                 else
                                 {
                                     var locals = new Value[callee.NumParams + callee.NumLocals + 1];
@@ -260,11 +261,45 @@ public sealed class Interpreter : ExecutorBase
                         if (_stack.Count < argc) return Err(VmErrorKind.StackUnderflow, $"call '{name}': need {argc} args, have {_stack.Count}");
 
                         var args = new object?[argc];
-                        for (int ai = argc - 1; ai >= 0; ai--) args[ai] = ValueToObject(Pop());
+                        var paramTypes = nativeStub?.ParamTypeNames;
+                        for (int ai = argc - 1; ai >= 0; ai--)
+                        {
+                            var v = Pop();
+                            // Struct params flow to the bridge as C-layout bytes
+                            // (the bridge converts them to blittable C# structs).
+                            if (paramTypes is { Length: > 0 } && ai < paramTypes.Length && StructMarshaller.IsStructType(Mod, paramTypes[ai]))
+                            {
+                                var packed = StructMarshaller.Pack(Mod, this, paramTypes[ai], v);
+                                if (packed.IsError) return packed.Error;
+                                args[ai] = packed.Value;
+                            }
+                            else
+                            {
+                                args[ai] = ValueToObject(v);
+                            }
+                        }
                         object? result;
                         try { result = handler(name, args); }
                         catch (Exception ex) { return Err(VmErrorKind.RuntimeError, $"call '{name}': {ex.Message}"); }
-                        Push(MarshalValue(result));
+                        // Struct returns arrive as C-layout bytes; unpack them
+                        // into a fresh heap object (handling nested structs).
+                        if (nativeStub?.ReturnTypeName is string rtn && StructMarshaller.IsStructType(Mod, rtn))
+                        {
+                            if (result is byte[] packedBytes)
+                            {
+                                var unpacked = StructMarshaller.Unpack(Mod, this, rtn, packedBytes);
+                                if (unpacked.IsError) return unpacked.Error;
+                                Push(Value.FromObj(unpacked.Value));
+                            }
+                            else
+                            {
+                                Push(MarshalValue(result));
+                            }
+                        }
+                        else
+                        {
+                            Push(MarshalValue(result));
+                        }
                         break;
                     }
 

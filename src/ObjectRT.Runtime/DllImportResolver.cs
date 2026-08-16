@@ -39,6 +39,10 @@ public sealed class DllImportResolver : INativeResolver
     // className (e.g. "User32") → (dllName, entryPoint defaults)
     private readonly Dictionary<string, DllImportInfo> _imports = new(StringComparer.Ordinal);
 
+    // Wire struct name → fields (name, wire type). Collected from the module so
+    // method signatures can be typed as blittable C# structs.
+    private readonly Dictionary<string, List<(string Name, string WireType)>> _moduleStructs = new(StringComparer.Ordinal);
+
     // qualifiedName → cached delegate
     private readonly ConcurrentDictionary<string, Func<object?[], object?>> _cache = new(StringComparer.Ordinal);
 
@@ -57,8 +61,10 @@ public sealed class DllImportResolver : INativeResolver
     {
         public string Name = "";
         public string? EntryPoint;
+        public string RetWireType = "void";
         public string CSharpRetType = "void";
-        public readonly List<(string ParamName, string CsType, string Attrs)> Params = new();
+        public bool ReturnIsStruct;
+        public readonly List<(string ParamName, string WireType, string CsType, string Attrs, bool IsStruct)> Params = new();
     }
 
     // ── Type mapping ────────────────────────────────────────────
@@ -75,6 +81,34 @@ public sealed class DllImportResolver : INativeResolver
 
     private static string MapType(string irType) =>
         TypeMap.TryGetValue(irType, out var cs) ? cs : "int";
+
+    /// <summary>Exact module-struct key for a wire type name (last-segment
+    /// fallback: "Color" finds "com.example.Color"), or null when not a struct.</summary>
+    private string? FindStructKey(string wireType)
+    {
+        if (string.IsNullOrEmpty(wireType)) return null;
+        if (_moduleStructs.ContainsKey(wireType)) return wireType;
+        int dot = wireType.LastIndexOf('.');
+        if (dot > 0 && dot < wireType.Length - 1)
+        {
+            string shortName = wireType[(dot + 1)..];
+            foreach (var key in _moduleStructs.Keys)
+                if (key == shortName || key.EndsWith("." + shortName, StringComparison.Ordinal)) return key;
+        }
+        return null;
+    }
+
+    /// <summary>True when 'irType' names a struct declared in the scanned module.</summary>
+    private bool IsModuleStruct(string irType) => FindStructKey(irType) != null;
+
+    /// <summary>Maps a wire type to (C# type, isStruct). Struct names map to the generated blittable C# struct.</summary>
+    private (string CsType, bool IsStruct) MapStructAware(string irType)
+    {
+        var key = FindStructKey(irType);
+        if (key != null)
+            return ($"__st_{BridgeClassName(key)}", true);
+        return (MapType(irType), false);
+    }
 
     private static bool ReturnsValue(string irType) =>
         !string.Equals(irType, "void", StringComparison.OrdinalIgnoreCase);
@@ -122,6 +156,19 @@ public sealed class DllImportResolver : INativeResolver
     /// </summary>
     public int ScanModule(ORBTModule mod, Action<string>? logger = null)
     {
+        // Collect every struct the module declares so import signatures can be
+        // typed as blittable C# structs (structs passed to / returned from
+        // native functions by value).
+        _moduleStructs.Clear();
+        foreach (var type in mod.Types)
+        {
+            if ((ObjectRT.Abstractions.TypeKind)(byte)type.Kind != ObjectRT.Abstractions.TypeKind.Struct) continue;
+            var fields = new List<(string, string)>(type.Fields.Count);
+            foreach (var f in type.Fields)
+                fields.Add((mod.Resolve(f.NameIndex), mod.Resolve(f.TypeIndex)));
+            _moduleStructs[mod.Resolve(type.NameIndex)] = fields;
+        }
+
         int count = 0;
         foreach (var type in mod.Types)
         {
@@ -155,21 +202,24 @@ public sealed class DllImportResolver : INativeResolver
 
                 // Return type
                 var retType = mod.Resolve(method.SignatureIndex);
-                mi.CSharpRetType = MapType(retType);
+                var (retCs, retStruct) = MapStructAware(retType);
+                mi.RetWireType = retType;
+                mi.CSharpRetType = retCs;
+                mi.ReturnIsStruct = retStruct;
 
                 // Parameters
                 foreach (var p in method.Params)
                 {
                     var pname = mod.Resolve(p.NameIndex);
                     var ptype = mod.Resolve(p.TypeIndex);
-                    var cst = MapType(ptype);
+                    var (cst, isStruct) = MapStructAware(ptype);
                     // Modern C libraries (raylib, SDL, ...) take `const char*`
                     // as UTF-8. LPWStr would pass UTF-16 bytes, which a C
                     // string reader truncates at the first NUL byte (the
                     // classic "H" instead of "Hello world" bug).
                     var attrs = ptype.Equals("string", StringComparison.OrdinalIgnoreCase)
                         ? "[MarshalAs(UnmanagedType.LPUTF8Str)]" : "";
-                    mi.Params.Add((pname, cst, attrs));
+                    mi.Params.Add((pname, ptype, cst, attrs, isStruct));
                 }
 
                 info.Methods.Add(mi);
@@ -288,6 +338,85 @@ public sealed class DllImportResolver : INativeResolver
             sb.AppendLine();
         }
 
+        // ── Struct definitions + marshalling helpers ──────────────
+        // Structs referenced by import signatures, transitively (a struct field
+        // may itself be a struct). Blittable Sequential C# structs, so the CLR
+        // P/Invoke layer moves them to/from native by value.
+        var referencedStructs = new List<string>();
+        var referencedSet = new HashSet<string>(StringComparer.Ordinal);
+        var structStack = new Stack<string>();
+        foreach (var (_, info) in _imports)
+        {
+            foreach (var mi in info.Methods)
+            {
+                if (mi.ReturnIsStruct) structStack.Push(mi.RetWireType);
+                foreach (var p in mi.Params) if (p.IsStruct) structStack.Push(p.WireType);
+            }
+        }
+        while (structStack.Count > 0)
+        {
+            var name = structStack.Pop();
+            var key = FindStructKey(name);
+            if (key == null || !referencedSet.Add(key)) continue;
+            referencedStructs.Add(key);
+            foreach (var (_, ft) in _moduleStructs[key])
+            {
+                var fkey = FindStructKey(ft);
+                if (fkey != null) structStack.Push(fkey);
+            }
+        }
+
+        sb.AppendLine("internal static class __dll_conv");
+        sb.AppendLine("{");
+        sb.AppendLine("    public static T __from_bytes<T>(byte[] b) where T : struct");
+        sb.AppendLine("    {");
+        sb.AppendLine("        var g = System.Runtime.InteropServices.GCHandle.Alloc(b, GCHandleType.Pinned);");
+        sb.AppendLine("        try { return System.Runtime.InteropServices.Marshal.PtrToStructure<T>(g.AddrOfPinnedObject()); }");
+        sb.AppendLine("        finally { g.Free(); }");
+        sb.AppendLine("    }");
+        sb.AppendLine("    public static byte[] __to_bytes<T>(T v) where T : struct");
+        sb.AppendLine("    {");
+        sb.AppendLine("        int size = System.Runtime.InteropServices.Marshal.SizeOf<T>();");
+        sb.AppendLine("        var b = new byte[size];");
+        sb.AppendLine("        var g = System.Runtime.InteropServices.GCHandle.Alloc(b, GCHandleType.Pinned);");
+        sb.AppendLine("        try { System.Runtime.InteropServices.Marshal.StructureToPtr(v, g.AddrOfPinnedObject(), false); }");
+        sb.AppendLine("        finally { g.Free(); }");
+        sb.AppendLine("        return b;");
+        sb.AppendLine("    }");
+        sb.AppendLine("    public static byte __cvt_byte(object? v) => unchecked((byte)(int)v!);");
+        sb.AppendLine("    public static sbyte __cvt_sbyte(object? v) => unchecked((sbyte)(int)v!);");
+        sb.AppendLine("    public static short __cvt_short(object? v) => unchecked((short)(int)v!);");
+        sb.AppendLine("    public static ushort __cvt_ushort(object? v) => unchecked((ushort)(int)v!);");
+        sb.AppendLine("    public static uint __cvt_uint(object? v) => unchecked((uint)(int)v!);");
+        sb.AppendLine("    public static ulong __cvt_ulong(object? v) => unchecked((ulong)(long)v!);");
+        sb.AppendLine("    public static long __cvt_long(object? v) => (long)v!;");
+        sb.AppendLine("    public static float __cvt_float(object? v) => (float)Convert.ToDouble(v!);");
+        sb.AppendLine("    public static double __cvt_double(object? v) => Convert.ToDouble(v!);");
+        sb.AppendLine("    public static bool __cvt_bool(object? v) => Convert.ToBoolean(v!);");
+        sb.AppendLine("    public static char __cvt_char(object? v) => (char)(int)v!;");
+        sb.AppendLine("    public static object? __norm_byte(byte v) => (int)v;");
+        sb.AppendLine("    public static object? __norm_sbyte(sbyte v) => (int)v;");
+        sb.AppendLine("    public static object? __norm_short(short v) => (int)v;");
+        sb.AppendLine("    public static object? __norm_ushort(ushort v) => (int)v;");
+        sb.AppendLine("    public static object? __norm_uint(uint v) => unchecked((int)v);");
+        sb.AppendLine("    public static object? __norm_ulong(ulong v) => unchecked((long)v);");
+        sb.AppendLine("    public static object? __norm_char(char v) => (int)v;");
+        sb.AppendLine("}");
+
+        foreach (var name in referencedStructs)
+        {
+            sb.AppendLine("[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]");
+            sb.AppendLine($"public struct __st_{BridgeClassName(name)} {{");
+            foreach (var (fname, ftype) in _moduleStructs[name])
+            {
+                var fkey = FindStructKey(ftype);
+                var fcs = fkey != null ? $"__st_{BridgeClassName(fkey)}" : MapType(ftype);
+                sb.AppendLine($"    public {fcs} {SafeIdentifier(fname)};");
+            }
+            sb.AppendLine("}");
+            sb.AppendLine();
+        }
+
         foreach (var (className, info) in _imports)
         {
             var safeClass = $"__dll_{BridgeClassName(className)}";
@@ -327,25 +456,41 @@ public sealed class DllImportResolver : INativeResolver
             // Bridge delegates: object?[] ↔ typed P/Invoke call
             foreach (var mi in info.Methods)
             {
-                var ret = mi.CSharpRetType;
-                var returns = ret != "void";
+                var returns = mi.CSharpRetType != "void";
 
                 sb.Append($"    public static object? __bridge_{mi.Name}(object?[] a) {{");
-
-                if (returns) sb.Append(" return ");
-                sb.Append($"__pinvk_{mi.Name}(");
 
                 var args = new List<string>();
                 for (int i = 0; i < mi.Params.Count; i++)
                 {
                     var p = mi.Params[i];
-                    args.Add($"({p.CsType})a[{i}]!");
+                    if (p.IsStruct)
+                        args.Add($"__dll_conv.__from_bytes<__st_{BridgeClassName(FindStructKey(p.WireType)!)}>((byte[])a[{i}]!)");
+                    else if (p.WireType.Equals("int32", StringComparison.OrdinalIgnoreCase))
+                        args.Add($"(int)a[{i}]!");
+                    else if (p.WireType.Equals("string", StringComparison.OrdinalIgnoreCase))
+                        args.Add($"(string)a[{i}]!");
+                    else
+                        args.Add($"__dll_conv.__cvt_{p.CsType}(a[{i}])");
                 }
-                sb.Append(string.Join(", ", args));
-                sb.Append(");");
 
-                if (!returns) sb.Append(" return null;");
-                sb.AppendLine(" }");
+                var call = $"__pinvk_{mi.Name}({string.Join(", ", args)})";
+                if (!returns)
+                {
+                    sb.AppendLine($" {call}; return null; }}");
+                }
+                else if (mi.ReturnIsStruct)
+                {
+                    sb.AppendLine($" return __dll_conv.__to_bytes({call}); }}");
+                }
+                else if (NeedsReturnNorm(mi.RetWireType))
+                {
+                    sb.AppendLine($" return __dll_conv.__norm_{mi.CSharpRetType}({call}); }}");
+                }
+                else
+                {
+                    sb.AppendLine($" return {call}; }}");
+                }
             }
 
             sb.AppendLine("}");
@@ -479,6 +624,38 @@ public sealed class DllImportResolver : INativeResolver
     }
 
     private static string Escape(string s) => s.Replace("\\", "\\\\").Replace("\"", "\\\"");
+
+    /// <summary>Escapes a generated field name when it collides with a C# keyword.</summary>
+    private static string SafeIdentifier(string name)
+    {
+        switch (name)
+        {
+            case "abstract": case "as": case "base": case "bool": case "break": case "byte":
+            case "case": case "catch": case "char": case "checked": case "class": case "const":
+            case "continue": case "decimal": case "default": case "delegate": case "do": case "double":
+            case "else": case "enum": case "event": case "explicit": case "extern": case "false":
+            case "finally": case "fixed": case "float": case "for": case "foreach": case "goto":
+            case "if": case "implicit": case "in": case "int": case "interface": case "internal":
+            case "is": case "lock": case "long": case "namespace": case "new": case "null":
+            case "object": case "operator": case "out": case "override": case "params": case "private":
+            case "protected": case "public": case "readonly": case "ref": case "return": case "sbyte":
+            case "sealed": case "short": case "sizeof": case "stackalloc": case "static": case "string":
+            case "struct": case "switch": case "this": case "throw": case "true": case "try":
+            case "typeof": case "uint": case "ulong": case "unchecked": case "unsafe": case "ushort":
+            case "using": case "virtual": case "void": case "volatile": case "while":
+                return "@" + name;
+            default:
+                return name;
+        }
+    }
+
+    /// <summary>Returns that the CLR can hand back to the VM unchanged. All
+    /// other integer/char widths must be re-widened to what the VM expects.</summary>
+    private static bool NeedsReturnNorm(string wireType) => wireType.ToLowerInvariant() switch
+    {
+        "int8" or "uint8" or "int16" or "uint16" or "uint32" or "uint64" or "char" => true,
+        _ => false,
+    };
 
     private static string ComputeHash(string source)
     {

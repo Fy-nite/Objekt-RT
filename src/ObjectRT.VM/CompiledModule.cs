@@ -40,6 +40,16 @@ public class CompiledFunction
 
     /// <summary>Index within the module's function table for fast dispatch.</summary>
     public uint SelfIndex { get; set; }
+
+    /// <summary>
+    /// Wire type name of each parameter ("int32", "string", "uint8", "Color",
+    /// ...), in order. Used by interop marshalling so a native call can pack
+    /// struct arguments and convert primitive widths.
+    /// </summary>
+    public string[]? ParamTypeNames { get; set; }
+
+    /// <summary>Wire type name of the return type, for interop marshalling.</summary>
+    public string? ReturnTypeName { get; set; }
 }
 
 // ── VMType — minimal resolved type descriptor ──────────────────────────
@@ -54,6 +64,13 @@ public class VMType
     public uint MethodOffset { get; set; }
     public uint MethodCount { get; set; }
     public uint InstanceSize { get; set; }
+
+    /// <summary>
+    /// Wire type name of each field ("int32", "uint8", "Color", ...), in order.
+    /// Used by interop marshalling to pack/unpack a struct object into the C
+    /// layout expected by the P/Invoke bridge.
+    /// </summary>
+    public string[]? FieldTypeNames { get; set; }
 }
 
 // ── VMField — field with resolved layout offset ───────────────────────
@@ -123,6 +140,25 @@ public class CompiledModule
     {
         for (int i = 0; i < Types.Count; i++)
             if (Types[i].DebugName == name) return i;
+        return -1;
+    }
+
+    /// <summary>
+    /// Index of the type with this debug (wire) name, or -1. Falls back to a
+    /// last-segment match ("Color" finds "com.lib.Color").
+    /// </summary>
+    public int FindTypeIndexByName(string name)
+    {
+        int idx = FindTypeIndex(name);
+        if (idx >= 0) return idx;
+        int dot = name.LastIndexOf('.');
+        if (dot > 0 && dot < name.Length - 1)
+        {
+            string shortName = name[(dot + 1)..];
+            for (int i = 0; i < Types.Count; i++)
+                if (Types[i].DebugName == shortName || Types[i].DebugName.EndsWith("." + shortName, StringComparison.Ordinal))
+                    return i;
+        }
         return -1;
     }
 }

@@ -144,7 +144,7 @@ public class ORBTWriter
         {
             WriteU16(imp.ModuleIndex);
             WriteU16(imp.SymbolIndex);
-            WriteU16((ushort)imp.Kind);
+            WriteU8((byte)imp.Kind);
             WriteU8(imp.Flags);
         }
     }
@@ -155,7 +155,7 @@ public class ORBTWriter
         foreach (var exp in mod.Exports)
         {
             WriteU16(exp.NameIndex);
-            WriteU16((ushort)exp.Kind);
+            WriteU8((byte)exp.Kind);
             WriteU32(exp.LocalIndex);
             WriteU16(exp.ModuleIndex);
         }

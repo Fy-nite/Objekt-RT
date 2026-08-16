@@ -19,7 +19,7 @@ encoding layer, not instruction semantics.
 
 = File Layout
 
-A ORBT V1 file consists of four sequential sections:
+A ORBT V1 file consists of six sequential sections:
 
 #figure(
   align(center)[#table(
@@ -33,13 +33,16 @@ A ORBT V1 file consists of four sequential sections:
       (three `uint16`).
     ],
     [String pool], [
-      A length-prefixed table of interned UTF-8 strings referenced by
-      index throughout the rest of the file.
+      A `uint16` count followed by a length-prefixed table of interned
+      UTF-8 strings referenced by index throughout the rest of the file.
     ],
     [Type table], [
-      Sequential type records: kind byte, name index, namespace index,
-      base type index, interface index list, field count + field records,
-      method count + method records.
+      A `uint16` count followed by sequential type records: kind byte,
+      name index, namespace index, access byte, flags byte, base type
+      index, interface count + interface index list, field count + field
+      records, method count + method records, attribute count + attribute
+      records. Method bodies are embedded inline within each method
+      record.
     ],
     [Import table], [
       Declarations of external symbols required by this module. Each
@@ -56,19 +59,54 @@ A ORBT V1 file consists of four sequential sections:
       from other modules during the merge process.
     ],
     [Metadata block], [
-      An optional block declaring spec version targeting and runtime
-      capability requirements (see §Metadata Block Format). If absent,
-      the module is assumed to target ObjectRT v1.0 with no feature
-      requirements.
-    ],
-    [Method bodies], [
-      Per-method: parameter count + parameter records, local count +
-      local records, instruction count + instruction records.
+      A length-prefixed block declaring spec version targeting and
+      runtime capability requirements (see §Metadata Block Format). A
+      zero length means no entries; the module is then treated as
+      targeting ObjectRT v1.0 with no feature requirements.
     ],
   )],
   kind: table,
   caption: [ORBT V1 file sections],
 )
+
+= String Encoding
+
+All text in an ORBT file uses the same length-prefixed UTF-8 encoding:
+the module name in the header, every entry in the string pool, and
+string values in the metadata block.
+
+#figure(
+  align(center)[#table(
+    columns: (30%, 70%),
+    align: (left, left),
+    table.header([#strong[Field]], [#strong[Description]]),
+    table.hline(),
+    [`length (uint16)`], [Byte count of the UTF-8 data that follows (`0x0000`--`0xFFFF`)],
+    [`data (bytes)`],    [UTF-8 encoded text],
+  )],
+  kind: table,
+  caption: [Length-prefixed string encoding],
+)
+
+- The length is a *byte* count, not a character count. UTF-8 encodes
+  each code point in 1--4 bytes, so non-ASCII text takes more bytes than
+  characters; the `uint16` length caps a string at 65,535 bytes. A
+  length of `0x0000` is a valid empty string.
+- Strings are not NUL-terminated. The length is authoritative, and the
+  data may contain embedded NUL bytes.
+- No byte-order mark is written; the UTF-8 data starts immediately after
+  the length.
+- Encoders must emit well-formed UTF-8. The C\# reader decodes with
+  .NET's UTF-8 decoder, which replaces malformed sequences with U+FFFD;
+  the C++ reader copies the raw bytes into a `std::string` without
+  validation.
+- All multi-byte fields in the file, including this length, are stored
+  little-endian.
+
+Instructions never inline text. Operands that carry text — notably
+`ldstr`, plus the name/type indices in field, method, label, attribute,
+import, and export records — hold a `uint16` index into the string pool;
+the string data itself lives in the pool (see String Pool Format).
 
 = Opcode Encoding Scheme
 
@@ -121,12 +159,13 @@ assignments as `00 II`. Tables 1--255 are extension tables.
 [`18`], [`ret`],        [`33`], [`brtrue`],
 [`19`], [`if`],         [`34`], [`brfalse`],
 [`1A`], [`while`],      [`35`], [`callnative`],
+[`36`], [`ldlen`],      [],     [],
   )],
   kind: table,
   caption: [ORBT V1 opcode map — table 0 (main instruction table)],
 )
 
-Table 0 ends at `0x35` (`callnative`). New opcodes are allocated in
+Table 0 ends at `0x36` (`ldlen`). New opcodes are allocated in
 extension tables using the `0xFF` prefix scheme.
 
 == Table 1 (Type Objects)
@@ -148,8 +187,9 @@ under the `table * 256 + opcode` convention is `0x0101`.
 
 = String Pool Format
 
-The string pool is a contiguous block of concatenated, length-prefixed
-UTF-8 strings. Each entry:
+The string pool is preceded by a `uint16` count and consists of a
+contiguous block of concatenated, length-prefixed UTF-8 strings. Each
+entry:
 
 #figure(
   align(center)[#table(
@@ -157,18 +197,20 @@ UTF-8 strings. Each entry:
     align: (left, left),
     table.header([#strong[Field]], [#strong[Description]]),
     table.hline(),
+    [`count (uint16)`],  [Number of strings in the pool],
     [`length (uint16)`], [Byte count of the string data (0--65,535)],
     [`data (bytes)`],    [UTF-8 encoded string content],
   )],
   kind: table,
-  caption: [String pool entry format],
+  caption: [String pool format],
 )
 
 Strings are referenced by their 0-based index in declaration order.
 
 = Type Record Format
 
-Each type in the type table is encoded as:
+The type table is preceded by a `uint16` type count. Each type in the
+type table is encoded as:
 
 #figure(
   align(center)[#table(
@@ -188,6 +230,8 @@ Each type in the type table is encoded as:
     [`field_records`],        [Array of field records (see below)],
     [`method_count (uint16)`], [Number of methods],
     [`method_records`],       [Array of method records (see below)],
+    [`attribute_count (uint16)`], [Number of type-level attributes],
+    [`attribute_records`],    [Array of attribute records (see Attribute Record Format)],
   )],
   kind: table,
   caption: [Type record format],
@@ -219,6 +263,29 @@ opcode (`ldsfld`/`stsfld` vs `ldfld`/`stfld`). ORBT v2 adds the explicit
 alone, without scanning instruction streams. Files that use the `flags`
 byte must set format version `0x02` in the header; v1 readers reject
 unknown format versions.
+
+= Attribute Record Format
+
+Both types and methods carry a count-prefixed attribute list. Each
+attribute record is encoded as:
+
+#figure(
+  align(center)[#table(
+    columns: (30%, 70%),
+    align: (left, left),
+    table.header([#strong[Field]], [#strong[Description]]),
+    table.hline(),
+    [`name_index (uint16)`], [Index of the attribute name in the string pool],
+    [`arg_count (uint16)`],  [Number of attribute arguments],
+    [`arg_indices`],         [Array of `uint16` indexes into the string pool],
+  )],
+  kind: table,
+  caption: [Attribute record format],
+)
+
+Type-level attributes appear at the end of each type record; method-level
+attributes appear inside each method record, between the label table and
+the instruction data.
 
 = Import Table Format
 
@@ -402,12 +469,17 @@ the ObjectIL specification (`ObjectIL.typ`, §Module Metadata).
     [`local_records`],           [Array of `(name_index, type_index)` pairs],
     [`label_count (uint16)`],    [Number of labels (may be `0x0000`)],
     [`label_table`],             [Array of label records (see Label Table Format)],
+    [`attribute_count (uint16)`], [Number of method-level attributes],
+    [`attribute_records`],       [Array of attribute records (see Attribute Record Format)],
     [`instr_count (uint32)`],    [Number of instructions in the body],
     [`instruction_data`],        [Serialised instruction stream (opcode chain + operands)],
   )],
   kind: table,
   caption: [Method record format],
 )
+
+Method bodies are encoded inline within their type record's method
+records; there is no separate method-body section at the end of the file.
 
 = Label Table Format
 

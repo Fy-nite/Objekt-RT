@@ -76,6 +76,14 @@ public class ModuleCompiler
                 InstanceSize = (uint)srcType.FieldCount * VmConstants.FieldSlotSize,
             };
 
+            if (srcType.FieldCount > 0)
+            {
+                var fieldTypes = new string[srcType.Fields.Count];
+                for (int i = 0; i < srcType.Fields.Count; i++)
+                    fieldTypes[i] = src.Resolve(srcType.Fields[i].TypeIndex);
+                vmt.FieldTypeNames = fieldTypes;
+            }
+
             // Find method offset in the function table
             for (int mi = 0; mi < srcType.Methods.Count; mi++)
             {
@@ -587,6 +595,14 @@ public class ModuleCompiler
             MaxStack = 0,
         };
         func.SourceMap = method.LineMappings;
+
+        // Interop metadata: wire type names for the params and the return
+        // (SignatureIndex holds the return type name), so the interpreter can
+        // marshal structs and primitive widths across the native boundary.
+        if (method.Params.Count > 0)
+            func.ParamTypeNames = method.Params.Select(p => src.Resolve(p.TypeIndex)).ToArray();
+        if (method.SignatureIndex < src.StringPool.Count)
+            func.ReturnTypeName = src.Resolve(method.SignatureIndex);
 
         var state = new CompileState();
 

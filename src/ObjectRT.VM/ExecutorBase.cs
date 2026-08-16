@@ -84,7 +84,7 @@ public abstract class ExecutorBase : IExecutor
 
     // ── Heap allocation ────────────────────────────────────────────
 
-    protected Result<uint> AllocObject(uint typeIdx)
+    public Result<uint> AllocObject(uint typeIdx)
     {
         if (typeIdx >= Mod.Types.Count)
             return new VmError(VmErrorKind.InvalidTypeIndex,
