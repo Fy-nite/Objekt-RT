@@ -3,7 +3,7 @@ using System.Reflection;
 using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
-using ObjectRT.Abstractions;
+using ObjektRT.Core.Model;
 
 namespace ObjectRT.Runtime;
 
@@ -162,7 +162,7 @@ public sealed class DllImportResolver : INativeResolver
         _moduleStructs.Clear();
         foreach (var type in mod.Types)
         {
-            if ((ObjectRT.Abstractions.TypeKind)(byte)type.Kind != ObjectRT.Abstractions.TypeKind.Struct) continue;
+            if ((ObjektRT.Core.Model.TypeKind)(byte)type.Kind != ObjektRT.Core.Model.TypeKind.Struct) continue;
             var fields = new List<(string, string)>(type.Fields.Count);
             foreach (var f in type.Fields)
                 fields.Add((mod.Resolve(f.NameIndex), mod.Resolve(f.TypeIndex)));

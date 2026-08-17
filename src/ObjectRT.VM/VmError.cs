@@ -1,7 +1,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
-using ObjectRT.Abstractions;
+using ObjektRT.Core.Model;
 
 namespace ObjectRT.VM;
 

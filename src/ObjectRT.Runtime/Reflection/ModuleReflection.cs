@@ -1,5 +1,5 @@
 using System.Runtime.CompilerServices;
-using ObjectRT.Abstractions;
+using ObjektRT.Core.Model;
 
 namespace ObjectRT.Runtime.Reflection;
 

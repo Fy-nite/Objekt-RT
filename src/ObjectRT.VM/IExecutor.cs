@@ -1,4 +1,4 @@
-using ObjectRT.Abstractions;
+using ObjektRT.Core.Model;
 
 namespace ObjectRT.VM;
 

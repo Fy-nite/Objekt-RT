@@ -2,7 +2,7 @@ using System.Reflection;
 using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
-using ObjectRT.Abstractions;
+using ObjektRT.Core.Model;
 
 namespace ObjectRT.VM;
 

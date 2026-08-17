@@ -1,6 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <ProjectReference Include="..\ObjectRT.Abstractions\ObjectRT.Abstractions.csproj" />
     <ProjectReference Include="..\ObjectRT.VM\ObjectRT.VM.csproj" />
   </ItemGroup>
 

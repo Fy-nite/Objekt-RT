@@ -1,5 +1,5 @@
 using System.Globalization;
-using ObjectRT.Abstractions;
+using ObjektRT.Core.Model;
 
 namespace ObjectRT.VM;
 
@@ -1019,7 +1019,7 @@ public class ModuleCompiler
 
     private static List<Instruction> DecodeRawBytecode(byte[] raw, ORBTModule src)
     {
-        var stream = new ObjectRT.Reader.BinaryStream(raw);
+        var stream = new ObjektRT.Core.Serialization.BinaryStream(raw);
         var instructions = new List<Instruction>();
 
         var pool = src.StringPool;
@@ -1036,7 +1036,7 @@ public class ModuleCompiler
         return instructions;
     }
 
-    private static Opcode ReadRawOpcode(ObjectRT.Reader.BinaryStream s, ref uint pc)
+    private static Opcode ReadRawOpcode(ObjektRT.Core.Serialization.BinaryStream s, ref uint pc)
     {
         int table = 0;
         while (true)
@@ -1053,7 +1053,7 @@ public class ModuleCompiler
         }
     }
 
-    private static Operand ReadRawOperand(ObjectRT.Reader.BinaryStream s, Opcode opcode, StringPool pool, ref uint pc)
+    private static Operand ReadRawOperand(ObjektRT.Core.Serialization.BinaryStream s, Opcode opcode, StringPool pool, ref uint pc)
     {
         switch (opcode)
         {
@@ -1118,7 +1118,7 @@ public class ModuleCompiler
         }
     }
 
-    private static ConditionOperand ReadRawCondition(ObjectRT.Reader.BinaryStream s, ref uint pc)
+    private static ConditionOperand ReadRawCondition(ObjektRT.Core.Serialization.BinaryStream s, ref uint pc)
     {
         byte kind = s.ReadU8(); pc++;
         switch ((ConditionKind)kind)
@@ -1139,7 +1139,7 @@ public class ModuleCompiler
         }
     }
 
-    private static ExceptionHandlerOperand ReadRawExceptionHandler(ObjectRT.Reader.BinaryStream s, ref uint pc)
+    private static ExceptionHandlerOperand ReadRawExceptionHandler(ObjektRT.Core.Serialization.BinaryStream s, ref uint pc)
     {
         uint tryLen = s.ReadU32(); pc += 4;
         var tryBlock = s.ReadBytes((int)tryLen); pc += tryLen;

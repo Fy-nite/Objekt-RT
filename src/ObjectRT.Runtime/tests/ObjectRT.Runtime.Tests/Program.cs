@@ -1,5 +1,6 @@
-using ObjectRT.Abstractions;
-using ObjectRT.Reader;
+using ObjektRT.Core.Model;
+using ObjektRT.Core.Parsing;
+using ObjektRT.Core.Serialization;
 using ObjectRT.Runtime;
 using ObjectRT.Runtime.Reflection;
 

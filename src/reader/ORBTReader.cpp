@@ -127,10 +127,11 @@ ORBTModule ORBTReader::read_module() {
 }
 
 void ORBTReader::read_header(ORBTModule& mod) {
-    // Magic: 4 bytes "ORBT"
-    uint32_t magic = stream_.read_u32();
-    if (magic != 0x4F524254) {
-        throw std::runtime_error("Invalid ORBT magic: expected 0x4F524254");
+    // Magic: 4 literal bytes "ORBT" (4F 52 42 54), checked as raw bytes.
+    // Reading them as a little-endian u32 would yield 0x5442524F ("TBRO").
+    auto magic = stream_.read_bytes(4);
+    if (magic[0] != 'O' || magic[1] != 'R' || magic[2] != 'B' || magic[3] != 'T') {
+        throw std::runtime_error("Invalid ORBT magic: expected \"ORBT\"");
     }
 
     // Format version

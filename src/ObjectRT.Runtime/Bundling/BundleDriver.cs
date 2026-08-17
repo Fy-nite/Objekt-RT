@@ -4,7 +4,8 @@ using System.Reflection;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using ObjectRT.Abstractions;
-using ObjectRT.Reader;
+using ObjektRT.Core.Model;
+using ObjektRT.Core.Serialization;
 
 namespace ObjectRT.Runtime;
 
@@ -143,7 +144,7 @@ public static class BundleDriver
         var required = new[]
         {
             "ObjectRT.Runtime.dll", "ObjectRT.VM.dll",
-            "ObjectRT.Reader.dll", "ObjectRT.Abstractions.dll",
+            "ObjektRT.Core.dll", "ObjectRT.Abstractions.dll",
             "Microsoft.CodeAnalysis.dll", "Microsoft.CodeAnalysis.CSharp.dll",
         };
         var missing = required
@@ -370,7 +371,7 @@ public static class BundleDriver
         sb.AppendLine("using System.Linq;");
         sb.AppendLine("using System.Reflection;");
         sb.AppendLine("using ObjectRT.Abstractions;");
-        sb.AppendLine("using ObjectRT.Reader;");
+        sb.AppendLine("using ObjektRT.Core.Serialization;");
         sb.AppendLine();
         sb.AppendLine("internal static class Program");
         sb.AppendLine("{");

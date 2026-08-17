@@ -3,7 +3,8 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
 using ObjectRT.Abstractions;
-using ObjectRT.Reader;
+using ObjektRT.Core.Model;
+using ObjektRT.Core.Parsing;
 using ObjectRT.VM;
 // Alias so bare "MethodInfo" keeps meaning System.Reflection.MethodInfo
 // (used by ObjectRTDispatchProxy); module reflection lives under its own name.
