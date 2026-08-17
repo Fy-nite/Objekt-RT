@@ -60,7 +60,9 @@ csharp_aot_lib = custom_target('csharp-native-aot',
     console          : true,
 )
 
-# ── Main ObjectRT runtime (linked with C# AOT static library) ────────────
+# ── Example: C++ host linked against the C# Native AOT runtime ────────────
+# The runtime is the C# implementation (src/csharp → ObjectRT.VM etc.),
+# AOT-compiled to a static library and linked from a C++ host program.
 rt_sources = files([
     'src/Program.cpp',
     'src/stdlib/IO/IO.cpp',
@@ -70,28 +72,4 @@ executable('ObjectRT', rt_sources,
     dependencies : dependencies,
     link_with    : csharp_aot_lib,
     include_directories : inc_dir)
-
-# ── Reader & VM ────────────────────────────────────────────────────────────
-reader_sources = files([
-    'src/reader/main.cpp',
-    'src/reader/ORBTReader.cpp',
-    'src/reader/ObjectILParser.cpp',
-    'src/vm/ModuleCompiler.cpp',
-    'src/vm/Interpreter.cpp',
-])
-compiler_sources = files([
-    'src/reader/ORBTReader.cpp',
-    'src/reader/ObjectILParser.cpp',
-    'src/vm/ModuleCompiler.cpp',
-    'src/vm/Interpreter.cpp',
-    'src/compiler/Program.cpp'
-])
-
-executable('objectrt-reader', reader_sources,
-    dependencies: dependencies,
-    include_directories: inc_dir)
-
-executable('ORBC', compiler_sources,
-    dependencies: dependencies,
-    include_directories: inc_dir)
 

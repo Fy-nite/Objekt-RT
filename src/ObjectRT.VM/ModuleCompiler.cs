@@ -63,8 +63,34 @@ public class ModuleCompiler
 
         uint fieldIdx = 0;
 
-        foreach (var srcType in src.Types)
+        // Inherited fields must live at the START of a derived instance, so a
+        // base method reading `Animal::name` on a Dog finds the same slot the
+        // Dog's constructor wrote. InstanceSize accumulates base sizes and a
+        // type's own fields start at its base's total size. Bases may appear
+        // AFTER their derived types in the list, so compute sizes up front with
+        // memoized recursion over BaseTypeIndex.
+        var ownOffset = new uint[src.Types.Count];
+        var sizeMemo = new int[src.Types.Count];
+        Array.Fill(sizeMemo, -1);
+
+        uint TypeInstanceSize(int typeIdx)
         {
+            if (sizeMemo[typeIdx] >= 0) return (uint)sizeMemo[typeIdx];
+            var t = src.Types[typeIdx];
+            uint size = 0;
+            if (t.BaseTypeIndex >= 0 && t.BaseTypeIndex < src.Types.Count)
+                size = TypeInstanceSize(t.BaseTypeIndex);
+            ownOffset[typeIdx] = size;
+            size += (uint)t.FieldCount * VmConstants.FieldSlotSize;
+            sizeMemo[typeIdx] = (int)size;
+            return size;
+        }
+        for (int i = 0; i < src.Types.Count; i++)
+            TypeInstanceSize(i);
+
+        for (int typeIdx = 0; typeIdx < src.Types.Count; typeIdx++)
+        {
+            var srcType = src.Types[typeIdx];
             var vmt = new VMType
             {
                 DebugName = src.Resolve(srcType.NameIndex),
@@ -73,7 +99,7 @@ public class ModuleCompiler
                 FieldOffset = fieldIdx,
                 FieldCount = srcType.FieldCount,
                 MethodCount = srcType.MethodCount,
-                InstanceSize = (uint)srcType.FieldCount * VmConstants.FieldSlotSize,
+                InstanceSize = (uint)sizeMemo[typeIdx],
             };
 
             if (srcType.FieldCount > 0)
@@ -94,7 +120,8 @@ public class ModuleCompiler
 
             mod.Types.Add(vmt);
 
-            // Collect fields
+            // Collect fields — offsets are relative to the START of the heap
+            // buffer, so a derived type's own fields sit after its base's.
             for (int fi = 0; fi < srcType.Fields.Count; fi++)
             {
                 var srcField = srcType.Fields[fi];
@@ -102,7 +129,7 @@ public class ModuleCompiler
                 {
                     DebugName = src.Resolve(srcField.NameIndex),
                     TypeIndex = 0,
-                    Offset = (uint)fi * VmConstants.FieldSlotSize,
+                    Offset = ownOffset[typeIdx] + (uint)fi * VmConstants.FieldSlotSize,
                 };
                 mod.Fields.Add(vmf);
                 fieldIdx++;
