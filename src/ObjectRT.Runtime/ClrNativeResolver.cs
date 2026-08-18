@@ -184,10 +184,18 @@ public sealed class ClrNativeResolver : INativeResolver
                         args[i] = (double)i5;
                     else if (target == typeof(double) && v is long l5)
                         args[i] = (double)l5;
+                    else if (target == typeof(double) && v is float f5)
+                        args[i] = (double)f5;
                     else if (target == typeof(float) && v is int i6)
                         args[i] = (float)i6;
+                    else if (target == typeof(float) && v is long l6)
+                        args[i] = (float)l6;
+                    else if (target == typeof(float) && v is double d6)
+                        args[i] = (float)d6;
                     else if (target == typeof(long) && v is int i7)
                         args[i] = (long)i7;
+                    else if (target.IsArray && v is System.Array srcArr)
+                        args[i] = CoerceArray(srcArr, target.GetElementType()!);
                 }
                 return method.Invoke(null, args);
             }
@@ -206,5 +214,41 @@ public sealed class ClrNativeResolver : INativeResolver
     {
         _typeMap.Clear();
         _cache.Clear();
+    }
+
+    /// <summary>
+    /// Converts a VM array (stored as <c>object[]</c>) to a typed array of the
+    /// declared element type, coercing each element (e.g. <c>object[]</c> of
+    /// ints → <c>int[]</c>, or of strings → <c>string[]</c>). Returns the
+    /// original array when the element types already match.
+    /// </summary>
+    private static System.Array CoerceArray(System.Array src, System.Type elementType)
+    {
+        if (src.GetType().GetElementType() == elementType) return src;
+        var dst = System.Array.CreateInstance(elementType, src.Length);
+        for (int i = 0; i < src.Length; i++)
+        {
+            var v = src.GetValue(i);
+            dst.SetValue(CoerceScalar(v, elementType), i);
+        }
+        return dst;
+    }
+
+    /// <summary>Coerces a single value to a target scalar type (numeric widening, bool, string).</summary>
+    private static object? CoerceScalar(object? v, System.Type target)
+    {
+        if (v == null) return null;
+        if (target.IsInstanceOfType(v)) return v;
+        if (target == typeof(bool) && v is int i) return i != 0;
+        if (target == typeof(int) && v is bool b) return b ? 1 : 0;
+        if (target == typeof(double) && v is int i2) return (double)i2;
+        if (target == typeof(double) && v is long l2) return (double)l2;
+        if (target == typeof(double) && v is float f2) return (double)f2;
+        if (target == typeof(float) && v is int i3) return (float)i3;
+        if (target == typeof(float) && v is long l3) return (float)l3;
+        if (target == typeof(float) && v is double d3) return (float)d3;
+        if (target == typeof(long) && v is int i4) return (long)i4;
+        if (target == typeof(string)) return v.ToString();
+        return v;
     }
 }

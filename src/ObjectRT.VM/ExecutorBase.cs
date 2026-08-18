@@ -31,6 +31,14 @@ public abstract class ExecutorBase : IExecutor
         set => _nativeCall = value;
     }
 
+    /// <summary>
+    /// When non-null, the interpreter/JIT increments a count each time a
+    /// module function is entered. The dictionary maps
+    /// <c>CompiledFunction.DebugName</c> → number of invocations. Useful for
+    /// profiling and the <c>--emit-callgraph</c> CLI flag.
+    /// </summary>
+    public System.Collections.Concurrent.ConcurrentDictionary<string, long>? CallCounts { get; set; }
+
     protected ExecutorBase(CompiledModule mod) : this(mod, null) { }
 
     protected ExecutorBase(CompiledModule mod, ExecutorState? shared)

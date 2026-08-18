@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -42,6 +43,7 @@ public sealed class ReflectionJit : ExecutorBase
 
     public override Result<Value> RunFunction(uint funcIdx, Value[] args)
     {
+        CallCounts?.AddOrUpdate(Mod.Functions[(int)funcIdx].DebugName, 1, (_, c) => c + 1);
         if (_compiled.TryGetValue(funcIdx, out var fn))
         {
             try { return fn(this, args); }
@@ -153,11 +155,9 @@ public sealed class ReflectionJit : ExecutorBase
 
     private static bool IsUnsupported(ushort op) => (Opcode)op switch
     {
-        Opcode.Ldfld or Opcode.Stfld or Opcode.Newobj or Opcode.Newarr
-            or Opcode.Ldelem or Opcode.Stelem
-            or Opcode.Conv or Opcode.Castclass or Opcode.Isinst
-            or Opcode.If or Opcode.While or Opcode.Try or Opcode.Throw
-            or Opcode.Break or Opcode.Continue => true,
+        // Structured exception handling and loop-control flow remain unsupported
+        // because they require frame/state management the JIT doesn't model yet.
+        Opcode.Try or Opcode.Throw or Opcode.Break or Opcode.Continue => true,
         _ => false,
     };
 
@@ -284,6 +284,72 @@ public sealed class ReflectionJit : ExecutorBase
                 { int off = Interpreter.ReadI32(code, ref pc); sb.Append($"    if (!s[--sp].IsTruthy()) goto L_{pos + ByteSize(op) + 4 + off};"); break; }
             case Opcode.Brtrue:
                 { int off = Interpreter.ReadI32(code, ref pc); sb.Append($"    if (s[--sp].IsTruthy()) goto L_{pos + ByteSize(op) + 4 + off};"); break; }
+
+            // ── Object model ───────────────────────────────────
+
+            case Opcode.Newobj:
+            {
+                ushort ti = Interpreter.ReadU16(code, ref pc);
+                sb.Append($"    {{ var _ar = exec.AllocObject({ti}); if (_ar.IsError) return _ar.Error; s[sp++] = Value.FromObj(_ar.Value); }}");
+                break;
+            }
+
+            case Opcode.Ldfld:
+            {
+                ushort fi = Interpreter.ReadU16(code, ref pc);
+                sb.Append($"    {{ var _o = s[--sp]; uint _h = _o.AsObj(); s[sp++] = MemoryMarshal.Read<Value>(exec.Heap[(int)_h].AsSpan((int){mod.Fields[(int)fi].Offset}, 16)); }}");
+                break;
+            }
+
+            case Opcode.Stfld:
+            {
+                ushort fi = Interpreter.ReadU16(code, ref pc);
+                sb.Append($"    {{ var _v = s[--sp]; var _o = s[--sp]; uint _h = _o.AsObj(); MemoryMarshal.Write(exec.Heap[(int)_h].AsSpan((int){mod.Fields[(int)fi].Offset}, 16), in _v); }}");
+                break;
+            }
+
+            // ── Arrays ─────────────────────────────────────────
+
+            case Opcode.Newarr:
+            {
+                Interpreter.ReadU16(code, ref pc);  // element type (informational)
+                sb.Append("    { var _len = s[--sp]; var _arr = new object[_len.I4]; s[sp++] = Value.FromObj(exec.State.InternExternal(_arr)); }");
+                break;
+            }
+
+            case Opcode.Ldelem:
+            {
+                sb.Append("    { var _idx = s[--sp]; var _arrV = s[--sp]; var _a = (System.Array)exec.State.GetExternal(_arrV.AsObj()); s[sp++] = e.MarshalValue(_a.GetValue(_idx.I4)); }");
+                break;
+            }
+
+            case Opcode.Stelem:
+            {
+                sb.Append("    { var _v = s[--sp]; var _idx = s[--sp]; var _arrV = s[--sp]; var _a = (System.Array)exec.State.GetExternal(_arrV.AsObj()); _a.SetValue(e.ValueToObject(_v), _idx.I4); }");
+                break;
+            }
+
+            // ── Type ops (no-ops in the dynamic VM) ────────────
+
+            case Opcode.Conv: case Opcode.Castclass: case Opcode.Isinst:
+                Interpreter.ReadU16(code, ref pc);  // type index (informational)
+                sb.Append("    // conv/cast (no-op in dynamic VM)");
+                break;
+
+            // ── Structured control flow (markers — actual branching is br/brtrue/brfalse) ──
+
+            case Opcode.If: case Opcode.While:
+            {
+                byte ck = code[pc++];
+                if (ck == 0x01) pc++;                  // comparison byte
+                else if (ck >= 0x02)                  // Expression or Block
+                {
+                    uint len = Interpreter.ReadU32(code, ref pc);
+                    pc += len;
+                }
+                sb.Append($"    // {(Opcode)op} marker (branching already compiled to br/brtrue/brfalse)");
+                break;
+            }
 
             default: sb.Append("    // ??"); break;
         }
@@ -413,6 +479,18 @@ public sealed class ReflectionJit : ExecutorBase
                 Interpreter.ReadU16(code, ref pc); break;
             case Opcode.Call: case Opcode.Callvirt: case Opcode.NativeCall: Interpreter.ReadU16(code, ref pc); Interpreter.ReadU16(code, ref pc); break;
             case Opcode.Br: case Opcode.Brtrue: case Opcode.Brfalse: Interpreter.ReadI32(code, ref pc); break;
+            // If/While: condition-kind byte, then optional comparison byte or embedded bytecode block.
+            case Opcode.If: case Opcode.While:
+            {
+                byte ck = code[pc++];
+                if (ck == 0x01) pc++;                    // Binary comparison byte
+                else if (ck >= 0x02)                    // Expression or Block
+                {
+                    uint len = Interpreter.ReadU32(code, ref pc);
+                    pc += len;
+                }
+                break;
+            }
         }
     }
 }

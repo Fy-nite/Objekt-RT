@@ -40,6 +40,7 @@ public sealed class Runtime : IHostedRuntime
 
     private CompiledModule? _compiled;
     private IExecutor? _executor;
+    private System.Collections.Concurrent.ConcurrentDictionary<string, long>? _callCounts;
 
     /// <summary>
     /// Instruction budget (VM steps) applied to every interpreter this runtime
@@ -85,6 +86,21 @@ public sealed class Runtime : IHostedRuntime
     {
         get => ObjectRT.VM.ReflectionJit.CacheDir;
         set => ObjectRT.VM.ReflectionJit.CacheDir = value;
+    }
+
+    /// <summary>
+    /// When non-null, every executor counts how many times each module
+    /// function is entered. Set this before running to enable call-graph
+    /// collection for the <c>--emit-callgraph</c> CLI flag.
+    /// </summary>
+    public System.Collections.Concurrent.ConcurrentDictionary<string, long>? CallCounts
+    {
+        get => _callCounts;
+        set
+        {
+            _callCounts = value;
+            if (_executor is ExecutorBase ex) ex.CallCounts = value;
+        }
     }
 
     // ── Constructor ────────────────────────────────────────────────
@@ -740,6 +756,7 @@ public sealed class Runtime : IHostedRuntime
             _ => new Interpreter(mod),
         };
         if (vm is Interpreter ip) ip.MaxSteps = MaxSteps;
+        if (vm is ExecutorBase eb) eb.CallCounts = _callCounts;
         AttachHostHandlers(vm);
         return vm;
     }

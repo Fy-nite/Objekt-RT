@@ -66,6 +66,7 @@ public sealed class Interpreter : ExecutorBase
 
         var func = Mod.GetFunction(funcIdx);
         _currentFuncName = func.DebugName;
+        CallCounts?.AddOrUpdate(func.DebugName, 1, (_, c) => c + 1);
 
         _stepsExecuted = 0;
 
@@ -229,6 +230,7 @@ public sealed class Interpreter : ExecutorBase
                             var tlocals = new Value[tcallee.NumParams + tcallee.NumLocals + 1];
                             Array.Fill(tlocals, Value.Nil());
                             for (int ai = (int)tcallee.NumParams - 1; ai >= 0; ai--) tlocals[ai] = dargs[ai];
+                            CallCounts?.AddOrUpdate(tcallee.DebugName, 1, (_, c) => c + 1);
                             _frames.Add(new Frame { Func = tcallee, Pc = 0, StackBase = (uint)_stack.Count, Locals = tlocals, RetFunc = frame.Func.SelfIndex, RetPc = pc });
                             goto nextFrame;
                         }
@@ -250,6 +252,7 @@ public sealed class Interpreter : ExecutorBase
                                     var locals = new Value[callee.NumParams + callee.NumLocals + 1];
                                     Array.Fill(locals, Value.Nil());
                                     for (int ai = (int)callee.NumParams - 1; ai >= 0; ai--) locals[ai] = Pop();
+                                    CallCounts?.AddOrUpdate(callee.DebugName, 1, (_, c) => c + 1);
                                     _frames.Add(new Frame { Func = callee, Pc = 0, StackBase = (uint)_stack.Count, Locals = locals, RetFunc = frame.Func.SelfIndex, RetPc = pc });
                                     goto nextFrame;
                                 }
