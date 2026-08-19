@@ -31,4 +31,9 @@ public interface IHostedRuntime
     /// The host decides how imports resolve — CLR reflection, JIT, native
     /// resolvers, etc.</summary>
     object? RunModule(ORBTModule module);
+
+    /// <summary>Loads the module and runs its entry point, passing the
+    /// command-line arguments through to a C#-style <c>Main(string[] args)</c>.
+    /// When the entry declares no parameter, the arguments are ignored.</summary>
+    object? RunModule(ORBTModule module, string[]? args);
 }

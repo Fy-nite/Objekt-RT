@@ -223,24 +223,41 @@ public sealed class Runtime : IHostedRuntime
     /// identically to <c>objectrt run</c>.
     /// </summary>
     public object? RunModule(ORBTModule module)
+        => RunModule(module, null);
+
+    /// <summary>
+    /// Scans the module's import metadata, loads it, and runs its entry point
+    /// (the static <c>Main</c> of the first type that has one), passing the
+    /// command-line arguments through to a C#-style <c>Main(string[] args)</c>.
+    /// When the entry declares no parameter, the arguments are ignored.
+    /// Mirrors the load-then-run sequence the CLI uses so bundled executables
+    /// behave identically to <c>objectrt run</c>.
+    /// </summary>
+    public object? RunModule(ORBTModule module, string[]? args)
     {
         DllResolver.ScanModule(module, null);
         NativeResolver.ScanModule(module, null);
         LoadModule(module);
 
         string? entry = null;
+        bool takesArgs = false;
         foreach (var t in module.Types)
         {
             var name = $"{module.Resolve(t.NameIndex)}.Main";
-            if (t.Methods.Any(m => module.Resolve(m.NameIndex) == "Main"))
+            foreach (var m in t.Methods)
             {
-                entry = name;
-                break;
+                if (module.Resolve(m.NameIndex) == "Main")
+                {
+                    entry = name;
+                    takesArgs = m.ParamCount > 0;
+                    break;
+                }
             }
+            if (entry != null) break;
         }
         if (entry is null)
             throw new InvalidOperationException("No entry point (class with static method Main) found.");
-        return CallMethod<object?>(entry);
+        return CallMethod<object?>(entry, takesArgs ? new object?[] { args ?? Array.Empty<string>() } : Array.Empty<object?>());
     }
 
     // ── Resolver chain ─────────────────────────────────────────────

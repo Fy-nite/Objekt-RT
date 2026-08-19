@@ -375,7 +375,7 @@ public static class BundleDriver
         sb.AppendLine();
         sb.AppendLine("internal static class Program");
         sb.AppendLine("{");
-        sb.AppendLine("    private static void Main()");
+        sb.AppendLine("    private static void Main(string[] args)");
         sb.AppendLine("    {");
 
         for (int i = 0; i < bindFiles.Count; i++)
@@ -411,7 +411,7 @@ public static class BundleDriver
         sb.AppendLine(@"            ?? throw new InvalidOperationException(""embedded module missing"");");
         sb.AppendLine("        var data = new byte[stream.Length];");
         sb.AppendLine("        _ = stream.Read(data, 0, data.Length);");
-        sb.AppendLine("        rt.RunModule(OrbtFileReader.ReadBytes(data));");
+        sb.AppendLine("        rt.RunModule(OrbtFileReader.ReadBytes(data), args);");
         sb.AppendLine("    }");
         sb.AppendLine("}");
         return sb.ToString();
