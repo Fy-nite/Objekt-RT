@@ -3,7 +3,7 @@ using ObjektRT.Core.Model;
 
 namespace ObjectRT.VM;
 
-internal class Frame
+public class Frame
 {
     public CompiledFunction Func { get; set; } = null!;
     public uint Pc;
@@ -11,6 +11,38 @@ internal class Frame
     public uint StackBase;
     public uint RetPc;
     public uint RetFunc;
+}
+
+/// <summary>
+/// Exception handler context pushed when entering a try block.
+/// </summary>
+internal sealed class ExceptionFrame
+{
+    /// <summary>Catch handler bytecodes (from CatchRecord.Body).</summary>
+    public byte[][] CatchBodies = [];
+    /// <summary>Exception type indices matching each catch body.</summary>
+    public ushort[] CatchTypeIndices = [];
+    /// <summary>Finally block bytecode, null if none.</summary>
+    public byte[]? FinallyBody;
+    /// <summary>Which block of this handler is currently executing.</summary>
+    public HandlerPhase Phase = HandlerPhase.TryBody;
+    /// <summary>After the finally runs, the pending exception must propagate outward.</summary>
+    public bool PendingRethrow;
+    /// <summary>The exception value to re-throw after a finally completes.</summary>
+    public Value PendingException;
+    /// <summary>Stack depth to restore to when entering a catch handler.</summary>
+    public int StackBase;
+    /// <summary>Outer code array to resume after the handler completes.</summary>
+    public byte[] OuterCode = [];
+    /// <summary>Outer PC to resume at after the handler completes.</summary>
+    public uint OuterPc;
+}
+
+internal enum HandlerPhase
+{
+    TryBody,
+    CatchBody,
+    FinallyBody,
 }
 
 /// <summary>
@@ -27,6 +59,9 @@ public sealed class Interpreter : ExecutorBase
     private bool _trace;
     private long _maxSteps;          // 0 = unlimited
     private long _stepsExecuted;
+
+    // ── Exception handling ──────────────────────────────────────────
+    private readonly Stack<ExceptionFrame> _exceptionHandlers = new();
 
     public Interpreter(CompiledModule mod) : base(mod) { }
     public Interpreter(CompiledModule mod, ExecutorState? shared) : base(mod, shared) { }
@@ -50,11 +85,21 @@ public sealed class Interpreter : ExecutorBase
     /// <summary>True when a VM function is currently executing on this interpreter.</summary>
     public bool IsExecuting => _frames.Count > 0;
 
+    /// <summary>Debug state for breakpoints, stepping, and pause/resume. Null when not debugging.</summary>
+    public InterpreterDebugState? DebugState { get; set; }
+
+    /// <summary>Get the current frame stack (for debug inspection). Read-only snapshot.</summary>
+    public IReadOnlyList<Frame> Frames => _frames;
+
+    /// <summary>Get the current PC (for debug inspection).</summary>
+    public uint CurrentPc => _currentPc;
+
     public override void Reset(bool clearHeap = false, bool clearStatics = false)
     {
         _stack.Clear();
         _frames.Clear();
         _currentFuncName = "";
+        _exceptionHandlers.Clear();
         if (clearHeap) Heap.Clear();
         if (clearStatics) Array.Fill(StaticFields, Value.Nil());
     }
@@ -100,12 +145,25 @@ public sealed class Interpreter : ExecutorBase
             int codeSize = code.Length;
             uint pc = frame.Pc;
 
+        blockEntry:; // re-entered with an embedded block's code/pc (try/catch/finally)
             while (pc < codeSize)
             {
                 if (_maxSteps != 0 && ++_stepsExecuted > _maxSteps)
                     return Err(VmErrorKind.StepBudgetExceeded,
                         $"instruction budget exceeded ({_maxSteps} steps)");
                 _currentPc = pc; // instruction start — used for error reporting
+
+                // ── Debug hook: check breakpoints, stepping, pause ──
+                if (DebugState != null && DebugState.CheckPause(frame.Func.DebugName, pc, _frames.Count, Mod))
+                {
+                    // Resumed after pause — refresh frame reference (may have been reset)
+                    frame = _frames[^1];
+                    code = frame.Func.Code;
+                    codeSize = code.Length;
+                    pc = frame.Pc;
+                    _currentFuncName = frame.Func.DebugName;
+                }
+
                 ushort op = ReadOpcode(code, ref pc);
                 if (_trace || Environment.GetEnvironmentVariable("ORTRT_TRACE") == "1")
                     Console.Error.WriteLine($"; {_currentFuncName} pc={pc - 1} op=0x{op:X2} stack={_stack.Count}");
@@ -376,17 +434,221 @@ public sealed class Interpreter : ExecutorBase
                     case Opcode.If: case Opcode.While:
                         { byte ck = code[pc++]; if (ck == 0x01) pc++; else if (ck >= 0x02) { uint len = ReadU32(code, ref pc); pc += len; } break; }
                     case Opcode.Try:
-                        { uint tl = ReadU32(code, ref pc); pc += tl; ushort cc = ReadU16(code, ref pc); for (ushort ci = 0; ci < cc; ci++) { ReadU16(code, ref pc); uint bl = ReadU32(code, ref pc); pc += bl; } if (code[pc++] != 0) { uint fl = ReadU32(code, ref pc); pc += fl; } break; }
-                    case Opcode.Throw: case Opcode.Break: case Opcode.Continue: break;
+                    {
+                        uint tl = ReadU32(code, ref pc);
+                        var tryBlock = new byte[tl];
+                        if (tl > 0) { Array.Copy(code, pc, tryBlock, 0, (int)tl); pc += tl; }
+                        ushort cc = ReadU16(code, ref pc);
+                        var catchBodies = new byte[cc][];
+                        var catchTypeIndices = new ushort[cc];
+                        for (ushort ci = 0; ci < cc; ci++)
+                        {
+                            catchTypeIndices[ci] = ReadU16(code, ref pc);
+                            uint bl = ReadU32(code, ref pc);
+                            catchBodies[ci] = new byte[bl];
+                            if (bl > 0) { Array.Copy(code, pc, catchBodies[ci], 0, (int)bl); pc += bl; }
+                        }
+                        bool hasFinally = code[pc++] != 0;
+                        byte[]? finallyBody = null;
+                        if (hasFinally)
+                        {
+                            uint fl = ReadU32(code, ref pc);
+                            finallyBody = new byte[fl];
+                            if (fl > 0) { Array.Copy(code, pc, finallyBody, 0, (int)fl); pc += fl; }
+                        }
+
+                        var ef = new ExceptionFrame
+                        {
+                            OuterCode = code,
+                            OuterPc = pc,
+                            StackBase = (int)_stack.Count,
+                            CatchBodies = catchBodies,
+                            CatchTypeIndices = catchTypeIndices,
+                            FinallyBody = finallyBody,
+                        };
+                        _exceptionHandlers.Push(ef);
+
+                        if (tl > 0)
+                        {
+                            code = tryBlock;
+                            codeSize = (int)tl;
+                            pc = 0;
+                        }
+                        break;
+                    }
+                    case Opcode.Throw:
+                    {
+                        var exVal = Pop();
+                        if (_exceptionHandlers.Count > 0)
+                        {
+                            var handled = TryDispatchThrow(exVal, ref frame, ref code, ref codeSize, ref pc);
+                            if (handled != null)
+                                return Err(handled.Value.Kind, handled.Value.Message);
+                            break; // continue the dispatch loop in the catch/finally body
+                        }
+                        return Err(VmErrorKind.RuntimeError,
+                            $"Unhandled exception: {FormatValue(exVal)}");
+                    }
+                    case Opcode.Break: case Opcode.Continue: break;
                     default: break;
                 }
                 frame.Pc = pc;
             }
+
+            // ── Embedded block completion (try/catch/finally) ──────
+            // When an embedded block (try body, catch body, or finally body)
+            // finishes, decide what to run next based on the handler's phase.
+            if (_exceptionHandlers.Count > 0)
+            {
+                var ef = _exceptionHandlers.Peek();
+                if (code != ef.OuterCode) // we're still inside an embedded block
+                {
+                    switch (ef.Phase)
+                    {
+                        case HandlerPhase.TryBody:
+                        case HandlerPhase.CatchBody:
+                            // Normal completion of try/catch body: run finally if present.
+                            if (ef.FinallyBody != null && ef.FinallyBody.Length > 0)
+                            {
+                                ef.Phase = HandlerPhase.FinallyBody;
+                                code = ef.FinallyBody;
+                                codeSize = code.Length;
+                                pc = 0;
+                                frame.Pc = 0;
+                                goto blockEntry;
+                            }
+                            // No finally — finish this handler, resume outer.
+                            _exceptionHandlers.Pop();
+                            code = ef.OuterCode;
+                            codeSize = code.Length;
+                            pc = ef.OuterPc;
+                            frame.Pc = pc;
+                            goto blockEntry;
+
+                        case HandlerPhase.FinallyBody:
+                            // Finally completed. Pop the handler.
+                            _exceptionHandlers.Pop();
+                            if (ef.PendingRethrow)
+                            {
+                                // The finally ran because of an exception — propagate it outward.
+                                var pending = ef.PendingException;
+                                var err = TryDispatchThrow(pending, ref frame, ref code, ref codeSize, ref pc);
+                                if (err != null) return Err(err.Value.Kind, err.Value.Message);
+                                goto blockEntry;
+                            }
+                            code = ef.OuterCode;
+                            codeSize = code.Length;
+                            pc = ef.OuterPc;
+                            frame.Pc = pc;
+                            goto blockEntry;
+                    }
+                }
+            }
+
             if (_frames.Count > 0) _frames.RemoveAt(_frames.Count - 1);
         nextFrame:;
         }
         return Value.Nil();
     }
+
+    // ── Exception handling ───────────────────────────────────────────
+
+    /// <summary>
+    /// Searches the exception handler stack for a matching catch handler,
+    /// restores the stack, pushes the exception, and switches execution to
+    /// the catch body (or finally body). Returns null when a handler was
+    /// found and execution should continue in the dispatch loop; returns an
+    /// error when the exception is unhandled.
+    /// </summary>
+    private (VmErrorKind Kind, string Message)? TryDispatchThrow(Value exVal, ref Frame frame,
+        ref byte[] code, ref int codeSize, ref uint pc)
+    {
+        while (_exceptionHandlers.Count > 0)
+        {
+            var ef = _exceptionHandlers.Pop();
+
+            // If we're already inside this handler's catch/finally body (a rethrow),
+            // it cannot catch itself. Run its finally if not yet, then propagate outward.
+            if (ef.Phase == HandlerPhase.CatchBody)
+            {
+                if (ef.FinallyBody != null && ef.FinallyBody.Length > 0)
+                {
+                    ef.Phase = HandlerPhase.FinallyBody;
+                    ef.PendingRethrow = true;
+                    ef.PendingException = exVal;
+                    code = ef.FinallyBody;
+                    codeSize = code.Length;
+                    pc = 0;
+                    frame.Pc = 0;
+                    _exceptionHandlers.Push(ef);
+                    return null;
+                }
+                continue; // no finally — keep unwinding outward
+            }
+
+            if (ef.Phase == HandlerPhase.FinallyBody)
+            {
+                // Exception thrown inside the finally body: propagate outward.
+                continue;
+            }
+
+            // Phase == TryBody — the try block threw. Restore the stack.
+            while (_stack.Count > ef.StackBase)
+                _stack.RemoveAt(_stack.Count - 1);
+
+            // Find a matching catch handler (first match wins; type index 0 = catch-all)
+            for (int ci = 0; ci < ef.CatchBodies.Length; ci++)
+            {
+                if (ef.CatchTypeIndices[ci] == 0 || ef.CatchBodies[ci].Length > 0)
+                {
+                    // Push the exception value for the catch variable
+                    Push(exVal);
+                    ef.Phase = HandlerPhase.CatchBody;
+                    ef.PendingRethrow = false;
+
+                    // Execute the catch body
+                    code = ef.CatchBodies[ci];
+                    codeSize = code.Length;
+                    pc = 0;
+                    frame.Pc = 0;
+                    _exceptionHandlers.Push(ef);
+                    return null;
+                }
+            }
+
+            // No matching catch — if there's a finally, run it then re-throw
+            if (ef.FinallyBody != null && ef.FinallyBody.Length > 0)
+            {
+                ef.Phase = HandlerPhase.FinallyBody;
+                ef.PendingRethrow = true;
+                ef.PendingException = exVal;
+                code = ef.FinallyBody;
+                codeSize = code.Length;
+                pc = 0;
+                frame.Pc = 0;
+                _exceptionHandlers.Push(ef);
+                return null;
+            }
+
+            // Continue searching outer handlers
+        }
+
+        return (VmErrorKind.RuntimeError,
+            $"Unhandled exception: {FormatValue(exVal)}");
+    }
+
+    /// <summary>Formats a Value for display in error messages.</summary>
+    private static string FormatValue(Value v) => v.Tag switch
+    {
+        ValueTag.Nil => "nil",
+        ValueTag.I4 => v.I4.ToString(),
+        ValueTag.I8 => v.I8.ToString(),
+        ValueTag.R4 => v.R4.ToString(),
+        ValueTag.R8 => v.R8.ToString(),
+        ValueTag.Str => $"\"{v.AsStr()}\"",
+        ValueTag.Obj => $"object@{v.AsObj()}",
+        _ => "<unknown>"
+    };
 
     // ── Delegate dispatch (shared by the interpreter case and threads) ──
 

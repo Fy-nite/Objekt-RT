@@ -3,6 +3,8 @@
   <ItemGroup>
     <ProjectReference Include="..\ObjectRT.Abstractions\ObjectRT.Abstractions.csproj" />
     <ProjectReference Include="..\ObjectRT.VM\ObjectRT.VM.csproj" />
+    <ProjectReference Include="..\..\..\ObjektRT.Core\ObjektRT.Core.csproj" />
+    <ProjectReference Include="..\..\..\ObjektRT.Stdlib\ObjektRT.Stdlib.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

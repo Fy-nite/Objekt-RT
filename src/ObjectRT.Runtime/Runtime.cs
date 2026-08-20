@@ -114,10 +114,13 @@ public sealed class Runtime : IHostedRuntime
     {
         RegisterBuiltins();
 
-        // Add the CLR reflection resolver by default.
+        // Add the CLR reflection resolver by default. Must be initialized
+        // before RegisterStdLib, which registers [ClassBinding] types via it.
         // Disable via ClrResolver.AllowReflection = false for NativeAOT.
         ClrResolver = new ClrNativeResolver();
         _resolvers.Add(ClrResolver);
+
+        StdLibRegistrar.RegisterStdLib(this);
 
         // Host interface resolver (source-generated hardwired dispatch with
         // reflection fallback). Disable via HostResolver.AllowReflection = false.
