@@ -299,6 +299,19 @@ public sealed class Interpreter : ExecutorBase
                             // most-derived declaration — the base chain is walked
                             // when the named type doesn't declare the method.
                             uint cfi = Mod.ResolveFunction(name);
+
+                            // Virtual dispatch (callvirt only): refine through
+                            // the RECEIVER's concrete type chain, so a call on
+                            // a base/interface-typed variable lands on the
+                            // most-derived override. Falls back to static
+                            // resolution when the receiver isn't a module
+                            // object of a related type.
+                            if (op == (ushort)Opcode.Callvirt)
+                            {
+                                uint refined = ResolveVirtual(name, argc);
+                                if (refined != uint.MaxValue) cfi = refined;
+                            }
+
                             if (cfi == uint.MaxValue) { /* no module function — fall through to native */ }
                             else
                             {
@@ -658,6 +671,57 @@ public sealed class Interpreter : ExecutorBase
         if (v.Tag != ValueTag.Obj || !ExecutorState.IsExternal(v.AsObj()))
             return null;
         return State.GetExternal(v.AsObj()) as System.Array;
+    }
+
+    /// <summary>
+    /// Virtual dispatch: for a callvirt "Type.Method(argc args)" whose receiver
+    /// (arg 0, the deepest of the pushed arguments) is a module heap object,
+    /// walk the RECEIVER's concrete type chain looking for a real override of
+    /// Method. The refined target is used only when the receiver's chain passes
+    /// through the named type — i.e. the receiver IS-A Type — so unrelated
+    /// static calls are never hijacked. Returns uint.MaxValue when no better
+    /// target exists and the caller should keep its static resolution.
+    /// </summary>
+    private uint ResolveVirtual(string name, ushort argc)
+    {
+        if (argc == 0 || _stack.Count < argc) return uint.MaxValue;
+
+        var recv = _stack[_stack.Count - argc];   // arg 0: pushed first, deepest
+        if (recv.Tag != ValueTag.Obj) return uint.MaxValue;
+        uint handle = recv.AsObj();
+        if (ExecutorState.IsExternal(handle)) return uint.MaxValue;
+        if (!State.TryGetObjectType(handle, out int typeIdx)) return uint.MaxValue;
+
+        int dot = name.LastIndexOf('.');
+        if (dot <= 0 || dot >= name.Length - 1) return uint.MaxValue;
+        string methodName = name[(dot + 1)..];
+        string typeName = name[..dot];
+        int staticTypeIdx = Mod.TryFindTypeIndex(typeName);
+
+        var seen = new HashSet<int>();
+        bool related = staticTypeIdx < 0;   // unresolvable named type: trust the chain
+        uint? firstCandidate = null;
+        int cur = typeIdx;
+        while (cur >= 0 && seen.Add(cur))
+        {
+            if (cur == staticTypeIdx) related = true;
+
+            if (firstCandidate == null)
+            {
+                var t = Mod.Types[cur];
+                if (Mod.FunctionMap.TryGetValue($"{t.DebugName}.{methodName}", out uint idx))
+                {
+                    var candidate = Mod.Functions[(int)idx];
+                    if (candidate.NumParams == argc && candidate.Code.Length > 2)
+                        firstCandidate = idx;
+                }
+            }
+            cur = Mod.Types[cur].BaseType;
+        }
+
+        // Only override the static target when the receiver genuinely derives
+        // from the call's named type.
+        return related && firstCandidate != null ? firstCandidate.Value : uint.MaxValue;
     }
 
     /// <summary>

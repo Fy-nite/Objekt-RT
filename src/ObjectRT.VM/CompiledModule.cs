@@ -143,6 +143,9 @@ public class CompiledModule
         return -1;
     }
 
+    /// <summary>Public wrapper for tools that need type lookup by wire name.</summary>
+    public int TryFindTypeIndex(string name) => FindTypeIndex(name);
+
     /// <summary>
     /// Index of the type with this debug (wire) name, or -1. Falls back to a
     /// last-segment match ("Color" finds "com.lib.Color").

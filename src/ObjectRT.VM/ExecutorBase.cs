@@ -101,6 +101,9 @@ public abstract class ExecutorBase : IExecutor
         var data = new byte[type.InstanceSize];
         uint handle = (uint)Heap.Count;
         Heap.Add(data);
+        // Remember the allocating type so virtual dispatch can walk the
+        // receiver's concrete chain (ExecutorState.ObjectTypes).
+        State.RecordObjectType(handle, (int)typeIdx);
         return handle;
     }
 }

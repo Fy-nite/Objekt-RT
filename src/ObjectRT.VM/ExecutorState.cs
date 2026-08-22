@@ -20,6 +20,20 @@ public sealed class ExecutorState
     /// <summary>Heap — each object is a byte buffer sized by the type's instance_size.</summary>
     public readonly List<byte[]> Heap = new();
 
+    /// <summary>
+    /// Heap handle → allocating type index. The VM's objects are plain byte
+    /// buffers, so this side table is what lets instance calls refine their
+    /// target through the RECEIVER's concrete type chain (virtual dispatch —
+    /// base/interface-typed variables calling the most-derived override).
+    /// </summary>
+    public readonly Dictionary<uint, int> ObjectTypes = new();
+
+    /// <summary>Records the type index a heap object was allocated as.</summary>
+    public void RecordObjectType(uint handle, int typeIdx) => ObjectTypes[handle] = typeIdx;
+
+    /// <summary>Looks up the allocating type index of a heap object.</summary>
+    public bool TryGetObjectType(uint handle, out int typeIdx) => ObjectTypes.TryGetValue(handle, out typeIdx);
+
     /// <summary>Static field storage.</summary>
     public readonly Value[] StaticFields;
 

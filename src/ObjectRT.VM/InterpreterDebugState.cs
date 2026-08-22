@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Threading;
 using ObjektRT.Core.Model;
 
@@ -175,16 +176,17 @@ public class InterpreterDebugState
 
     /// <summary>
     /// Returns true when stepping should pause at this point.
-    /// Called from the interpreter after each instruction.
+    /// Called from the interpreter after each instruction; pauses on source-line
+    /// change rather than per instruction, so a step advances a whole statement.
     /// </summary>
-    public bool ShouldStepPause(int currentDepth)
+    public bool ShouldStepPause(int currentDepth, int currentLine)
     {
         lock (_lock)
         {
             return _stepMode switch
             {
-                StepMode.StepIn => true,
-                StepMode.StepOver => currentDepth <= _stepTargetDepth,
+                StepMode.StepIn => currentLine != LastPausedLine,
+                StepMode.StepOver => currentDepth <= _stepTargetDepth && currentLine != LastPausedLine,
                 StepMode.StepOut => currentDepth < _stepTargetDepth,
                 _ => false
             };
@@ -201,13 +203,14 @@ public class InterpreterDebugState
         }
     }
 
-    /// <summary>Configure step-out: pause when we return to one level shallower.</summary>
+    /// <summary>Configure step-out: pause when execution returns above the
+    /// depth we are currently paused at.</summary>
     public void ConfigureStepOut(int currentDepth)
     {
         lock (_lock)
         {
             _stepMode = StepMode.StepOut;
-            _stepTargetDepth = currentDepth - 1;
+            _stepTargetDepth = currentDepth;
         }
     }
 
@@ -234,6 +237,9 @@ public class InterpreterDebugState
     private readonly ManualResetEventSlim _resumeEvent = new(true); // starts signaled (not paused)
     private volatile bool _pauseRequested;
 
+    /// <summary>Source line of the most recent pause; stepping compares against it.</summary>
+    public int LastPausedLine { get; private set; }
+
     /// <summary>True when the interpreter is currently paused.</summary>
     public bool IsPaused => !_resumeEvent.IsSet;
 
@@ -253,13 +259,16 @@ public class InterpreterDebugState
     /// <returns>True if execution should stop (pause point reached), false to continue.</returns>
     public bool CheckPause(string functionName, uint pc, int frameDepth, CompiledModule mod)
     {
-        // After resuming with step-over/step-out, skip one check to avoid
-        // re-pausing on the same instruction. Step-in does NOT skip.
+        int curLine = ResolveLineFromSourceMap(functionName, pc, mod);
+
+        // After resuming, skip the breakpoint check once so a breakpoint on the
+        // current instruction doesn't re-fire immediately. Stepping checks stay
+        // active — they are line/depth based and must not lose their landing spot.
+        bool skipBreakpointOnce = false;
         if (_justResumed)
         {
             _justResumed = false;
-            if (_stepMode != StepMode.StepIn)
-                return false;
+            skipBreakpointOnce = true;
         }
 
         // Check if a pause was requested (Ctrl+C or pause button)
@@ -267,20 +276,22 @@ public class InterpreterDebugState
         {
             _pauseRequested = false;
             _resumeEvent.Reset();
+            LastPausedLine = curLine;
             OnPause?.Invoke(this, new DebugPauseEventArgs
             {
                 Reason = "pause",
                 File = ResolveFileFromSourceMap(functionName, pc, mod),
-                Line = ResolveLineFromSourceMap(functionName, pc, mod),
+                Line = curLine,
             });
             _resumeEvent.Wait();
             return true;
         }
 
         // Check breakpoints
-        if (IsBreakpointHit(functionName, pc, out var file, out int line))
+        if (!skipBreakpointOnce && IsBreakpointHit(functionName, pc, out var file, out int line))
         {
             _resumeEvent.Reset();
+            LastPausedLine = line;
             OnPause?.Invoke(this, new DebugPauseEventArgs
             {
                 Reason = "breakpoint",
@@ -292,15 +303,16 @@ public class InterpreterDebugState
         }
 
         // Check stepping
-        if (ShouldStepPause(frameDepth))
+        if (ShouldStepPause(frameDepth, curLine))
         {
             _resumeEvent.Reset();
             ClearStep();
+            LastPausedLine = curLine;
             OnPause?.Invoke(this, new DebugPauseEventArgs
             {
                 Reason = "step",
                 File = ResolveFileFromSourceMap(functionName, pc, mod),
-                Line = ResolveLineFromSourceMap(functionName, pc, mod),
+                Line = curLine,
             });
             _resumeEvent.Wait();
             return true;
@@ -346,7 +358,7 @@ public class InterpreterDebugState
                 if (e.Offset <= pc) best = e;
                 else break;
             }
-            if (best != null && best.Text != null) return best.Text;
+            if (best != null && !string.IsNullOrEmpty(best.Text) && File.Exists(best.Text)) return best.Text;
         }
         return "";
     }
@@ -392,7 +404,7 @@ public class InterpreterDebugState
                 if (best != null)
                 {
                     line = best.Line;
-                    if (best.Text != null) file = best.Text;
+                    if (!string.IsNullOrEmpty(best.Text) && File.Exists(best.Text)) file = best.Text;
                 }
             }
 

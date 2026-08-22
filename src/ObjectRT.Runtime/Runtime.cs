@@ -316,6 +316,62 @@ public sealed class Runtime : IHostedRuntime
             (Func<object?, bool>)(t => RequireThread(t).IsAlive));
         RegisterNative("Thread.IsAlive(1)",
             (Func<object?, bool>)(t => RequireThread(t).IsAlive));
+
+        // List.Map / List.Filter / List.Reduce — higher-order stdlib helpers
+        // (FEATURE_PROPOSALS §7). The fn argument arrives as a boxed uint: the
+        // raw heap handle of a Contract delegate. Each element flows through
+        // InvokeDelegate, which runs on a fresh interpreter sharing this
+        // runtime's module state.
+        RegisterNative("List.Map",
+            (Func<object?, object?, object?>)((list, fn) => ListMap(list, fn)));
+        RegisterNative("List.Map(2)",
+            (Func<object?, object?, object?>)((list, fn) => ListMap(list, fn)));
+        RegisterNative("List.Filter",
+            (Func<object?, object?, object?>)((list, fn) => ListFilter(list, fn)));
+        RegisterNative("List.Filter(2)",
+            (Func<object?, object?, object?>)((list, fn) => ListFilter(list, fn)));
+        RegisterNative("List.Reduce",
+            (Func<object?, object?, object?, object?>)((list, fn, seed) => ListReduce(list, fn, seed)));
+        RegisterNative("List.Reduce(3)",
+            (Func<object?, object?, object?, object?>)((list, fn, seed) => ListReduce(list, fn, seed)));
+    }
+
+    private static global::System.Collections.Generic.List<object> RequireList(object? list)
+        => list as global::System.Collections.Generic.List<object>
+           ?? throw new ArgumentException("List.Map/Filter/Reduce expect a List created with List.Create().");
+
+    private static uint RequireDelegate(object? fn)
+        => fn is uint h ? h
+           : throw new ArgumentException("List.Map/Filter/Reduce expect a function value (fun ...).");
+
+    private object? ListMap(object? list, object? fn)
+    {
+        var h = RequireDelegate(fn);
+        var result = new global::System.Collections.Generic.List<object>();
+        foreach (var item in RequireList(list))
+            result.Add(InvokeDelegate(h, item)!);
+        return result;
+    }
+
+    private object ListFilter(object? list, object? fn)
+    {
+        var h = RequireDelegate(fn);
+        var result = new global::System.Collections.Generic.List<object>();
+        foreach (var item in RequireList(list))
+        {
+            if (Convert.ToBoolean(InvokeDelegate(h, item), global::System.Globalization.CultureInfo.InvariantCulture))
+                result.Add(item);
+        }
+        return result;
+    }
+
+    private object? ListReduce(object? list, object? fn, object? seed)
+    {
+        var h = RequireDelegate(fn);
+        var acc = seed;
+        foreach (var item in RequireList(list))
+            acc = InvokeDelegate(h, acc, item);
+        return acc;
     }
 
     /// <summary>
@@ -763,7 +819,11 @@ public sealed class Runtime : IHostedRuntime
         throw new MissingMethodException($"Native method '{name}' not found");
     }
 
-    private void AttachHostHandlers(IExecutor vm)
+    /// <summary>
+    /// Wires the host's native-call resolver onto an externally created
+    /// executor (e.g. a debug interpreter driven outside LoadModule/Run).
+    /// </summary>
+    public void AttachHostHandlers(IExecutor vm)
     {
         vm.NativeCallHandler = ResolveNativeCall;
     }
