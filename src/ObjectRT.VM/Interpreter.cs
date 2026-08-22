@@ -704,23 +704,34 @@ public sealed class Interpreter : ExecutorBase
         int cur = typeIdx;
         while (cur >= 0 && seen.Add(cur))
         {
+            var t = Mod.Types[cur];
             if (cur == staticTypeIdx) related = true;
 
-            if (firstCandidate == null)
+            // Interface parents count as IS-A too: a receiver typed through an
+            // interface relates via `implements`, not the base chain.
+            if (!related && t.InterfaceNames != null)
             {
-                var t = Mod.Types[cur];
-                if (Mod.FunctionMap.TryGetValue($"{t.DebugName}.{methodName}", out uint idx))
+                foreach (var iname in t.InterfaceNames)
                 {
-                    var candidate = Mod.Functions[(int)idx];
-                    if (candidate.NumParams == argc && candidate.Code.Length > 2)
-                        firstCandidate = idx;
+                    if (iname == typeName || Mod.TryFindTypeIndex(iname) == staticTypeIdx)
+                    {
+                        related = true;
+                        break;
+                    }
                 }
             }
-            cur = Mod.Types[cur].BaseType;
+
+            if (firstCandidate == null && Mod.FunctionMap.TryGetValue($"{t.DebugName}.{methodName}", out uint idx))
+            {
+                var candidate = Mod.Functions[(int)idx];
+                if (candidate.NumParams == argc && candidate.Code.Length > 2)
+                    firstCandidate = idx;
+            }
+            cur = t.BaseType;
         }
 
         // Only override the static target when the receiver genuinely derives
-        // from the call's named type.
+        // from (or implements) the call's named type.
         return related && firstCandidate != null ? firstCandidate.Value : uint.MaxValue;
     }
 

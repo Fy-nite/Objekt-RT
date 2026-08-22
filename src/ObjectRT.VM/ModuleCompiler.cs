@@ -110,6 +110,16 @@ public class ModuleCompiler
                 vmt.FieldTypeNames = fieldTypes;
             }
 
+            // Interface names survive into the compiled module so virtual
+            // dispatch can relate receivers to the call's named type through
+            // `implements` even when the base chain misses it.
+            if (srcType.InterfaceIndices is { Count: > 0 })
+            {
+                vmt.InterfaceNames = srcType.InterfaceIndices
+                    .Select(ix => src.Resolve(ix))
+                    .ToArray();
+            }
+
             // Find method offset in the function table
             for (int mi = 0; mi < srcType.Methods.Count; mi++)
             {

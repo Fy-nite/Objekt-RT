@@ -71,6 +71,13 @@ public class VMType
     /// layout expected by the P/Invoke bridge.
     /// </summary>
     public string[]? FieldTypeNames { get; set; }
+
+    /// <summary>
+    /// Names of the interfaces this type declares (<c>implements</c>).
+    /// Virtual dispatch consults these: a receiver whose base chain misses
+    /// the call's named type may still relate to it through an interface.
+    /// </summary>
+    public string[]? InterfaceNames { get; set; }
 }
 
 // ── VMField — field with resolved layout offset ───────────────────────
