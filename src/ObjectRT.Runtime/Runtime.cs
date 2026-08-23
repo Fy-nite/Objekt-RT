@@ -537,6 +537,9 @@ public sealed class Runtime : IHostedRuntime
 
         _compiled = result.Value;
         _executor = CreateExecutor(_compiled);
+
+        // Serve the in-language Reflect binding from this runtime.
+        Reflection.ReflectBinding.Attach(this);
     }
 
     /// <summary>Whether a module is currently loaded and ready.</summary>

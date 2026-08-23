@@ -191,6 +191,27 @@ try { triple.Invoke(rt, new object()); }
 catch (ArgumentException) { threw = true; }
 Check(threw, "Invoke rejects receiver on static method");
 
+// ── 4b. In-language Reflect binding ────────────────────────────────────────
+
+Console.WriteLine("== 4b. Reflect binding ==");
+var reflectNs = typeof(ObjectRT.Runtime.Reflection.ReflectBinding);
+
+rt.RegisterClrType("Reflect", reflectNs);
+Check(reflectNs.GetProperty("Host")!.GetValue(null) != null, "reflect host attached on load");
+Check(rt.CallMethod<string>("Reflect.ModuleName") == "ReflectTest", "Reflect.ModuleName via binding");
+
+var reflectedTypes = (string[]?)rt.CallMethod<object?>("Reflect.Types");
+Check(reflectedTypes != null && reflectedTypes.Contains("Circle"), "Reflect.Types lists Circle",
+    string.Join(",", reflectedTypes ?? Array.Empty<string>()));
+Check(rt.CallMethod<bool>("Reflect.HasType", "Shape"), "Reflect.HasType resolves short name");
+Check(rt.CallMethod<string>("Reflect.Resolve", "Square.Describe") == "Circle.Describe",
+    "Reflect.Resolve walks inheritance");
+Check(rt.CallMethod<bool>("Reflect.IsSubclassOf", "Square", "Shape"), "Reflect.IsSubclassOf");
+
+rt.CallMethod<object?>("Reflect.SetStatic", "MathBase", "factor", 7);
+Check((int)rt.CallMethod<object>("Reflect.GetStatic", "MathBase", "factor")! == 7,
+    "Reflect.GetStatic/SetStatic round-trip");
+
 // ── 5. Static field metadata survives the ORBT binary round-trip ──────────
 
 Console.WriteLine("== 5. ORBT binary round-trip (static fields) ==");
