@@ -539,7 +539,7 @@ public sealed class Runtime : IHostedRuntime
         _executor = CreateExecutor(_compiled);
 
         // Serve the in-language Reflect binding from this runtime.
-        Reflection.ReflectBinding.Attach(this);
+        ObjektRT.Stdlib.System.Reflect.Host = new Reflection.RuntimeReflectHost(this);
     }
 
     /// <summary>Whether a module is currently loaded and ready.</summary>

@@ -194,7 +194,7 @@ Check(threw, "Invoke rejects receiver on static method");
 // ── 4b. In-language Reflect binding ────────────────────────────────────────
 
 Console.WriteLine("== 4b. Reflect binding ==");
-var reflectNs = typeof(ObjectRT.Runtime.Reflection.ReflectBinding);
+var reflectNs = typeof(ObjektRT.Stdlib.System.Reflect);
 
 rt.RegisterClrType("Reflect", reflectNs);
 Check(reflectNs.GetProperty("Host")!.GetValue(null) != null, "reflect host attached on load");
