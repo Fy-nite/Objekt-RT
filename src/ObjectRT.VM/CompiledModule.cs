@@ -50,6 +50,12 @@ public class CompiledFunction
 
     /// <summary>Wire type name of the return type, for interop marshalling.</summary>
     public string? ReturnTypeName { get; set; }
+
+    /// <summary>Source name of each parameter, in slot order. Null when the module carries no names.</summary>
+    public string[]? ParamNames { get; set; }
+
+    /// <summary>Source name of each local, in slot order. Null when the module carries no names.</summary>
+    public string[]? LocalNames { get; set; }
 }
 
 // ── VMType — minimal resolved type descriptor ──────────────────────────

@@ -640,6 +640,10 @@ public class ModuleCompiler
             func.ParamTypeNames = method.Params.Select(p => src.Resolve(p.TypeIndex)).ToArray();
         if (method.SignatureIndex < src.StringPool.Count)
             func.ReturnTypeName = src.Resolve(method.SignatureIndex);
+        if (method.Params.Count > 0)
+            func.ParamNames = method.Params.Select(p => src.Resolve(p.NameIndex)).ToArray();
+        if (method.Locals.Count > 0)
+            func.LocalNames = method.Locals.Select(l => src.Resolve(l.NameIndex)).ToArray();
 
         var state = new CompileState();
 
