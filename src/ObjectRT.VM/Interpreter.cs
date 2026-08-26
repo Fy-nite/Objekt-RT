@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Runtime.InteropServices;
 using ObjektRT.Core.Model;
 
@@ -11,6 +12,12 @@ public class Frame
     public uint StackBase;
     public uint RetPc;
     public uint RetFunc;
+
+    /// <summary>
+    /// When true, Locals was rented from ArrayPool and must be returned on Ret.
+    /// False for frames that use the shared _localsScratch buffer.
+    /// </summary>
+    public bool LocalsRented;
 }
 
 /// <summary>
@@ -59,12 +66,13 @@ public sealed class Interpreter : ExecutorBase
     private bool _trace;
     private long _maxSteps;          // 0 = unlimited
     private long _stepsExecuted;
+    private readonly bool _traceEnvEnabled;  // read once, not per-instruction
 
     // ── Exception handling ──────────────────────────────────────────
     private readonly Stack<ExceptionFrame> _exceptionHandlers = new();
 
-    public Interpreter(CompiledModule mod) : base(mod) { }
-    public Interpreter(CompiledModule mod, ExecutorState? shared) : base(mod, shared) { }
+    public Interpreter(CompiledModule mod) : base(mod) { _traceEnvEnabled = Environment.GetEnvironmentVariable("ORTRT_TRACE") == "1"; }
+    public Interpreter(CompiledModule mod, ExecutorState? shared) : base(mod, shared) { _traceEnvEnabled = Environment.GetEnvironmentVariable("ORTRT_TRACE") == "1"; }
 
     public bool Trace { get => _trace; set => _trace = value; }
 
@@ -165,7 +173,7 @@ public sealed class Interpreter : ExecutorBase
                 }
 
                 ushort op = ReadOpcode(code, ref pc);
-                if (_trace || Environment.GetEnvironmentVariable("ORTRT_TRACE") == "1")
+                if (_trace || _traceEnvEnabled)
                     Console.Error.WriteLine($"; {_currentFuncName} pc={pc - 1} op=0x{op:X2} stack={_stack.Count}");
 
                 switch ((Opcode)op)
@@ -175,21 +183,21 @@ public sealed class Interpreter : ExecutorBase
                     case Opcode.LdcI8: { long v = ReadI64(code, ref pc); Push(Value.FromI8(v)); break; }
                     case Opcode.LdcR4: { float v = ReadF32(code, ref pc); Push(Value.FromR4(v)); break; }
                     case Opcode.LdcR8: { double v = ReadF64(code, ref pc); Push(Value.FromR8(v)); break; }
-                    case Opcode.Ldstr: { ushort si = ReadU16(code, ref pc); Push(Value.FromStr(InternString(Mod.GetString(si)))); break; }
+                    case Opcode.Ldstr: { ushort si = ReadU16(code, ref pc); Push(Value.FromStr(si)); break; }
                     case Opcode.Ldarg: { ushort idx = ReadU16(code, ref pc); Push(frame.Locals[idx]); break; }
                     case Opcode.Starg: { ushort idx = ReadU16(code, ref pc); frame.Locals[idx] = Pop(); break; }
                     case Opcode.Ldloc: { ushort idx = ReadU16(code, ref pc); Push(frame.Locals[frame.Func.NumParams + idx]); break; }
                     case Opcode.Stloc: { ushort idx = ReadU16(code, ref pc); frame.Locals[frame.Func.NumParams + idx] = Pop(); break; }
 
-                    case Opcode.Add: { var b = Pop(); var a = Pop(); Push(Arith(a, b, (x, y) => x + y, (x, y) => x + y, (x, y) => x + y, (x, y) => x + y)); break; }
-                    case Opcode.Sub: { var b = Pop(); var a = Pop(); Push(Arith(a, b, (x, y) => x - y, (x, y) => x - y, (x, y) => x - y, (x, y) => x - y)); break; }
-                    case Opcode.Mul: { var b = Pop(); var a = Pop(); Push(Arith(a, b, (x, y) => x * y, (x, y) => x * y, (x, y) => x * y, (x, y) => x * y)); break; }
+                    case Opcode.Add: { var b = Pop(); var a = Pop(); Push(I4Arith(a, b, I4Add, I8Add, R4Add, R8Add)); break; }
+                    case Opcode.Sub: { var b = Pop(); var a = Pop(); Push(I4Arith(a, b, I4Sub, I8Sub, R4Sub, R8Sub)); break; }
+                    case Opcode.Mul: { var b = Pop(); var a = Pop(); Push(I4Arith(a, b, I4Mul, I8Mul, R4Mul, R8Mul)); break; }
                     case Opcode.Div:
                     {
                         var b = Pop(); var a = Pop();
                         if ((a.Tag == ValueTag.I4 || a.Tag == ValueTag.I8) && IsZero(b))
                             return Err(VmErrorKind.DivisionByZero, "division by zero");
-                        Push(Arith(a, b, (x, y) => x / y, (x, y) => x / y, (x, y) => x / y, (x, y) => x / y));
+                        Push(I4Arith(a, b, I4Div, I8Div, R4Div, R8Div));
                         break;
                     }
                     case Opcode.Rem:
@@ -197,7 +205,7 @@ public sealed class Interpreter : ExecutorBase
                         var b = Pop(); var a = Pop();
                         if ((a.Tag == ValueTag.I4 || a.Tag == ValueTag.I8) && IsZero(b))
                             return Err(VmErrorKind.DivisionByZero, "remainder by zero");
-                        Push(Arith(a, b, (x, y) => x % y, (x, y) => x % y, (x, y) => x % y, (x, y) => x % y));
+                        Push(I4Arith(a, b, I4Rem, I8Rem, R4Rem, R8Rem));
                         break;
                     }
                     case Opcode.Neg: { Push(Negate(Pop())); break; }
@@ -285,11 +293,12 @@ public sealed class Interpreter : ExecutorBase
                             var dargs = new Value[totalArgs];
                             if (hasClosure) dargs[0] = closureVal;
                             for (int ai = argc - 1; ai >= 0; ai--) dargs[ai + (hasClosure ? 1 : 0)] = popped[ai];
-                            var tlocals = new Value[tcallee.NumParams + tcallee.NumLocals + 1];
-                            Array.Fill(tlocals, Value.Nil());
+                            int tlocalsLen = (int)(tcallee.NumParams + tcallee.NumLocals + 1);
+                            var tlocals = ArrayPool<Value>.Shared.Rent(tlocalsLen);
+                            Array.Fill(tlocals, Value.Nil(), 0, tlocalsLen);
                             for (int ai = (int)tcallee.NumParams - 1; ai >= 0; ai--) tlocals[ai] = dargs[ai];
                             CallCounts?.AddOrUpdate(tcallee.DebugName, 1, (_, c) => c + 1);
-                            _frames.Add(new Frame { Func = tcallee, Pc = 0, StackBase = (uint)_stack.Count, Locals = tlocals, RetFunc = frame.Func.SelfIndex, RetPc = pc });
+                            _frames.Add(new Frame { Func = tcallee, Pc = 0, StackBase = (uint)_stack.Count, Locals = tlocals, LocalsRented = true, RetFunc = frame.Func.SelfIndex, RetPc = pc });
                             goto nextFrame;
                         }
 
@@ -320,11 +329,13 @@ public sealed class Interpreter : ExecutorBase
                                 if (callee.Code.Length <= 2) { nativeStub = callee; /* fall through */ }
                                 else
                                 {
-                                    var locals = new Value[callee.NumParams + callee.NumLocals + 1];
-                                    Array.Fill(locals, Value.Nil());
+                                    int localsLen = (int)(callee.NumParams + callee.NumLocals + 1);
+                                    var locals = ArrayPool<Value>.Shared.Rent(localsLen);
+                                    // Clear only the portion we use (avoids touching pooled excess)
+                                    Array.Fill(locals, Value.Nil(), 0, localsLen);
                                     for (int ai = (int)callee.NumParams - 1; ai >= 0; ai--) locals[ai] = Pop();
                                     CallCounts?.AddOrUpdate(callee.DebugName, 1, (_, c) => c + 1);
-                                    _frames.Add(new Frame { Func = callee, Pc = 0, StackBase = (uint)_stack.Count, Locals = locals, RetFunc = frame.Func.SelfIndex, RetPc = pc });
+                                    _frames.Add(new Frame { Func = callee, Pc = 0, StackBase = (uint)_stack.Count, Locals = locals, LocalsRented = true, RetFunc = frame.Func.SelfIndex, RetPc = pc });
                                     goto nextFrame;
                                 }
                             }
@@ -386,6 +397,9 @@ public sealed class Interpreter : ExecutorBase
                         // region empty returns nil, not the caller's residue.
                         var retval = _stack.Count > frame.StackBase ? _stack[^1] : Value.Nil();
                         if (_stack.Count > frame.StackBase) _stack.RemoveAt(_stack.Count - 1);
+                        // Return rented locals array to pool
+                        if (frame.LocalsRented)
+                            ArrayPool<Value>.Shared.Return(frame.Locals);
                         uint rf = frame.RetFunc, rp = frame.RetPc;
                         _frames.RemoveAt(_frames.Count - 1);
                         if (_frames.Count == 0) { Push(retval); return retval; }
@@ -442,7 +456,43 @@ public sealed class Interpreter : ExecutorBase
                             Push(Value.FromI4(arr.Length));
                             break;
                         }
-                    case Opcode.Conv: case Opcode.Castclass: case Opcode.Isinst: { ReadU16(code, ref pc); break; }
+                    case Opcode.Conv: case Opcode.Castclass: { ReadU16(code, ref pc); break; }
+                    case Opcode.Isinst:
+                    {
+                        ushort typeIdx = ReadU16(code, ref pc);
+                        var val = Pop();
+                        if (val.Tag != ValueTag.Obj)
+                        {
+                            Push(Value.FromI4(0));
+                            break;
+                        }
+                        uint handle = val.AsObj();
+                        if (ExecutorState.IsExternal(handle) || !State.TryGetObjectType(handle, out int objType))
+                        {
+                            Push(Value.FromI4(0));
+                            break;
+                        }
+                        // Walk the type chain to check if objType is or derives from typeIdx
+                        int cur = objType;
+                        bool match = false;
+                        int depthLimit = 64;
+                        while (cur >= 0 && depthLimit-- > 0)
+                        {
+                            if (cur == typeIdx) { match = true; break; }
+                            var t = Mod.Types[cur];
+                            if (t.InterfaceNames != null)
+                            {
+                                foreach (var iname in t.InterfaceNames)
+                                {
+                                    if (Mod.TryFindTypeIndex(iname) == typeIdx) { match = true; break; }
+                                }
+                                if (match) break;
+                            }
+                            cur = t.BaseType;
+                        }
+                        Push(Value.FromI4(match ? 1 : 0));
+                        break;
+                    }
 
                     case Opcode.If: case Opcode.While:
                         { byte ck = code[pc++]; if (ck == 0x01) pc++; else if (ck >= 0x02) { uint len = ReadU32(code, ref pc); pc += len; } break; }
@@ -681,6 +731,9 @@ public sealed class Interpreter : ExecutorBase
     /// through the named type — i.e. the receiver IS-A Type — so unrelated
     /// static calls are never hijacked. Returns uint.MaxValue when no better
     /// target exists and the caller should keep its static resolution.
+    ///
+    /// Uses the pre-built vtable for O(1) dispatch when available, falling back
+    /// to the legacy chain-walk for modules compiled without vtables.
     /// </summary>
     private uint ResolveVirtual(string name, ushort argc)
     {
@@ -696,42 +749,62 @@ public sealed class Interpreter : ExecutorBase
         if (dot <= 0 || dot >= name.Length - 1) return uint.MaxValue;
         string methodName = name[(dot + 1)..];
         string typeName = name[..dot];
-        int staticTypeIdx = Mod.TryFindTypeIndex(typeName);
 
-        var seen = new HashSet<int>();
-        bool related = staticTypeIdx < 0;   // unresolvable named type: trust the chain
-        uint? firstCandidate = null;
-        int cur = typeIdx;
-        while (cur >= 0 && seen.Add(cur))
+        // Fast path: use the pre-built vtable (O(1) lookup, zero allocation)
+        uint result = Mod.ResolveVirtualMethod(typeIdx, methodName);
+        if (result != uint.MaxValue)
         {
-            var t = Mod.Types[cur];
-            if (cur == staticTypeIdx) related = true;
+            // Verify the receiver IS-A the call's named type (same semantics as legacy path)
+            int staticTypeIdx = Mod.TryFindTypeIndex(typeName);
+            if (staticTypeIdx < 0) return uint.MaxValue; // unresolvable: trust vtable only for known types
+            // Walk chain to check relationship (no HashSet needed — chain is short and bounded)
+            int cur = typeIdx;
+            int depthLimit = 64; // safety: types can't be more than 64 levels deep
+            while (cur >= 0 && depthLimit-- > 0)
+            {
+                if (cur == staticTypeIdx) return result;
+                var t = Mod.Types[cur];
+                if (t.InterfaceNames != null)
+                {
+                    foreach (var iname in t.InterfaceNames)
+                    {
+                        if (Mod.TryFindTypeIndex(iname) == staticTypeIdx) return result;
+                    }
+                }
+                cur = t.BaseType;
+            }
+            return uint.MaxValue;
+        }
 
-            // Interface parents count as IS-A too: a receiver typed through an
-            // interface relates via `implements`, not the base chain.
+        // Slow path fallback: legacy type-chain walk (for modules without vtables)
+        int staticTypeIdx2 = Mod.TryFindTypeIndex(typeName);
+        bool related = staticTypeIdx2 < 0;
+        uint? firstCandidate = null;
+        int cur2 = typeIdx;
+        int depthLimit2 = 64;
+        while (cur2 >= 0 && depthLimit2-- > 0)
+        {
+            var t = Mod.Types[cur2];
+            if (cur2 == staticTypeIdx2) related = true;
             if (!related && t.InterfaceNames != null)
             {
                 foreach (var iname in t.InterfaceNames)
                 {
-                    if (iname == typeName || Mod.TryFindTypeIndex(iname) == staticTypeIdx)
+                    if (iname == typeName || Mod.TryFindTypeIndex(iname) == staticTypeIdx2)
                     {
                         related = true;
                         break;
                     }
                 }
             }
-
             if (firstCandidate == null && Mod.FunctionMap.TryGetValue($"{t.DebugName}.{methodName}", out uint idx))
             {
                 var candidate = Mod.Functions[(int)idx];
                 if (candidate.NumParams == argc && candidate.Code.Length > 2)
                     firstCandidate = idx;
             }
-            cur = t.BaseType;
+            cur2 = t.BaseType;
         }
-
-        // Only override the static target when the receiver genuinely derives
-        // from (or implements) the call's named type.
         return related && firstCandidate != null ? firstCandidate.Value : uint.MaxValue;
     }
 
@@ -745,6 +818,8 @@ public sealed class Interpreter : ExecutorBase
         {
             if (a.Tag != ValueTag.Str || b.Tag != ValueTag.Str)
                 return false;
+            // Fast path: interned strings with the same handle are identical
+            if (a.AsStr() == b.AsStr()) return true;
             return string.Equals(GetStringValue(a.AsStr()), GetStringValue(b.AsStr()), StringComparison.Ordinal);
         }
         return NumericCompare(a, b) == 0;
@@ -759,13 +834,8 @@ public sealed class Interpreter : ExecutorBase
         if (handle >= state.Heap.Count)
             return (null, default, false);
 
-        // Fields are laid out contiguously per type: FieldOffset is the first
-        // global field index. Delegate declares [target, closure].
-        int delegateTypeIdx = -1;
-        for (int ti = 0; ti < mod.Types.Count; ti++)
-        {
-            if (mod.Types[ti].DebugName == "Delegate") { delegateTypeIdx = ti; break; }
-        }
+        // Use cached Delegate type index instead of O(n) linear scan
+        int delegateTypeIdx = mod.DelegateTypeIdx;
         if (delegateTypeIdx < 0)
             return (null, default, false);
         var dt = mod.Types[delegateTypeIdx];
@@ -830,6 +900,15 @@ public sealed class Interpreter : ExecutorBase
     public static readonly Func<long,long,long> I8Add = (x,y)=>x+y, I8Sub=(x,y)=>x-y, I8Mul=(x,y)=>x*y, I8Div=(x,y)=>x/y, I8Rem=(x,y)=>x%y;
     public static readonly Func<float,float,float> R4Add = (x,y)=>x+y, R4Sub=(x,y)=>x-y, R4Mul=(x,y)=>x*y, R4Div=(x,y)=>x/y, R4Rem=(x,y)=>x%y;
     public static readonly Func<double,double,double> R8Add = (x,y)=>x+y, R8Sub=(x,y)=>x-y, R8Mul=(x,y)=>x*y, R8Div=(x,y)=>x/y, R8Rem=(x,y)=>x%y;
+
+    /// <summary>Fast-path for int+int arithmetic — avoids delegate dispatch.</summary>
+    private static Value I4Arith(Value a, Value b, Func<int,int,int> fallbackOp,
+        Func<long,long,long> i8Op, Func<float,float,float> r4Op, Func<double,double,double> r8Op)
+    {
+        if (a.Tag == ValueTag.I4 && b.Tag == ValueTag.I4)
+            return Value.FromI4(fallbackOp(a.I4, b.I4));
+        return Arith(a, b, fallbackOp, i8Op, r4Op, r8Op);
+    }
 
     public static Value Arith(Value a, Value b,
         Func<int, int, int> opI4, Func<long, long, long> opI8,

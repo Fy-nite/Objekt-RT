@@ -36,9 +36,10 @@ public class DapServer
     private CancellationTokenSource? _cts;
     private volatile bool _exitRequested;
     private readonly Dictionary<int, (string file, int line, int col)> _variableRefs = new();
-    private int _nextVarRef;
+    private int _nextVarRef = 1;   // DAP reserves 0 as "not expandable"
     private readonly Dictionary<string, List<Breakpoint>> _breakpointsByFile = new();
     private string? _launchProgram;
+    private Dictionary<uint, string>? _staticNames;   // flat static slot -> "Type.field"
 
     public DapServer(TextReader stdin, TextWriter stdout, IDapProgramLoader loader)
     {
@@ -283,12 +284,13 @@ public class DapServer
         {
             DapLog.Write($"program starting: {program}");
 
-            var prog = await _loader.LoadAsync(program, _cts?.Token ?? default);
+            var prog = await _loader.LoadAsync(program, EmitOutput, _cts?.Token ?? default);
             var loadedMod = prog.Module;
 
             var interp = prog.Interpreter;
             interp.DebugState = _debugState;
             _module = loadedMod;
+            _staticNames = BuildStaticNameMap(loadedMod);
             _interpreter = interp;
 
             // Resolve breakpoints against source maps
@@ -328,6 +330,28 @@ public class DapServer
             await SendOutputAsync("stderr", ex.Message);
             await SendEventAsync("terminated", new { reason = "error", text = ex.Message });
         }
+    }
+
+    // ── Guest console output ───────────────────────────────────────
+
+    /// <summary>Forwards guest program output to the client as an output event.</summary>
+    private void EmitOutput(string category, string text)
+    {
+        if (string.IsNullOrEmpty(text)) return;
+        _ = Task.Run(async () =>
+        {
+            try { await SendOutputAsync(category, text); }
+            catch (Exception ex) { DapLog.Write($"output event dropped: {ex.Message}"); }
+        });
+    }
+
+    private static Dictionary<uint, string>? BuildStaticNameMap(CompiledModule module)
+    {
+        if (module.FieldMap.Count == 0) return null;
+        var reverse = new Dictionary<uint, string>();
+        foreach (var kv in module.FieldMap)
+            reverse[kv.Value] = kv.Key;
+        return reverse;
     }
 
     private async Task HandleSetBreakpointsAsync(DapMessage msg)
@@ -503,10 +527,9 @@ public class DapServer
             case "arguments":
                 for (int i = 0; i < frame.Func.NumParams && i < frame.Locals.Length; i++)
                 {
-                    var name = frame.Func.SourceMap?.Count > 0 ? $"arg{i}" : $"arg{i}";
                     variables.Add(new
                     {
-                        name = $"arg{i}",
+                        name = NameOf(frame.Func.ParamNames, i, "arg"),
                         value = FormatValue(frame.Locals[i]),
                         type = GetTypeName(frame.Locals[i]),
                         variablesReference = 0
@@ -518,16 +541,14 @@ public class DapServer
                 for (int i = 0; i < frame.Func.NumLocals; i++)
                 {
                     int idx = (int)(frame.Func.NumParams + i);
-                    if (idx < frame.Locals.Length)
+                    if (idx >= frame.Locals.Length) break;
+                    variables.Add(new
                     {
-                        variables.Add(new
-                        {
-                            name = $"local{i}",
-                            value = FormatValue(frame.Locals[idx]),
-                            type = GetTypeName(frame.Locals[idx]),
-                            variablesReference = 0
-                        });
-                    }
+                        name = NameOf(frame.Func.LocalNames, i, "local"),
+                        value = FormatValue(frame.Locals[idx]),
+                        type = GetTypeName(frame.Locals[idx]),
+                        variablesReference = 0
+                    });
                 }
                 break;
 
@@ -535,16 +556,16 @@ public class DapServer
                 for (int i = 0; i < _interpreter.StaticFields.Length && i < 100; i++)
                 {
                     var val = _interpreter.StaticFields[i];
-                    if (val.Tag != ValueTag.Nil)
+                    if (val.Tag == ValueTag.Nil) continue;
+                    string? staticName = null;
+                    _staticNames?.TryGetValue((uint)i, out staticName);
+                    variables.Add(new
                     {
-                        variables.Add(new
-                        {
-                            name = $"static{i}",
-                            value = FormatValue(val),
-                            type = GetTypeName(val),
-                            variablesReference = 0
-                        });
-                    }
+                        name = staticName ?? $"static{i}",
+                        value = FormatValue(val),
+                        type = GetTypeName(val),
+                        variablesReference = 0
+                    });
                 }
                 break;
         }
@@ -556,32 +577,27 @@ public class DapServer
     {
         var args = msg.Arguments;
         string? expression = GetArg<string>(args, "expression");
+        int frameHint = GetArg<int>(args, "frameId");
 
-        // Simple evaluation: look up locals/args by name
+        // Resolve the identifier against real param/local names, starting at
+        // the frame the client pointed at, then walking the rest of the stack.
         string result = "Unknown expression";
+        string type = "";
         int varRef = 0;
 
-        if (_interpreter != null && _interpreter.Frames.Count > 0 && expression != null)
+        if (_interpreter != null && !string.IsNullOrWhiteSpace(expression))
         {
-            var frame = _interpreter.Frames[^1];
+            var order = new List<int>();
+            if (frameHint >= 0 && frameHint < _interpreter.Frames.Count) order.Add(frameHint);
+            for (int i = _interpreter.Frames.Count - 1; i >= 0; i--)
+                if (!order.Contains(i)) order.Add(i);
 
-            // Try arg0..argN
-            for (int i = 0; i < frame.Func.NumParams; i++)
+            foreach (var fi in order)
             {
-                if ($"arg{i}" == expression || $"arg_{i}" == expression)
+                if (TryResolveName(_interpreter.Frames[fi], expression!, out var value))
                 {
-                    result = FormatValue(frame.Locals[i]);
-                    break;
-                }
-            }
-
-            // Try local0..localN
-            for (int i = 0; i < frame.Func.NumLocals; i++)
-            {
-                int idx = (int)(frame.Func.NumParams + i);
-                if (idx < frame.Locals.Length && ($"local{i}" == expression || $"local_{i}" == expression))
-                {
-                    result = FormatValue(frame.Locals[idx]);
+                    result = FormatValue(value);
+                    type = GetTypeName(value);
                     break;
                 }
             }
@@ -590,6 +606,7 @@ public class DapServer
         await SendResponseAsync(msg,new
         {
             result,
+            type,
             variablesReference = varRef
         });
     }
@@ -689,6 +706,41 @@ public class DapServer
     }
 
     // ── Helpers ────────────────────────────────────────────────────
+
+    /// <summary>Real source name for a slot when the module carries names, else a synthetic fallback.</summary>
+    private static string NameOf(string[]? names, int index, string fallbackPrefix) =>
+        names != null && index < names.Length && !string.IsNullOrEmpty(names[index])
+            ? names[index]!
+            : $"{fallbackPrefix}{index}";
+
+    private static bool TryResolveName(Frame frame, string name, out Value value)
+    {
+        value = default;
+        var func = frame.Func;
+        int numParams = (int)func.NumParams;
+
+        for (int i = 0; i < numParams && i < frame.Locals.Length; i++)
+        {
+            if (NameOf(func.ParamNames, i, "arg") == name || $"arg{i}" == name || $"arg_{i}" == name)
+            {
+                value = frame.Locals[i];
+                return true;
+            }
+        }
+
+        for (int i = 0; i < func.NumLocals; i++)
+        {
+            int idx = numParams + i;
+            if (idx >= frame.Locals.Length) break;
+            if (NameOf(func.LocalNames, i, "local") == name || $"local{i}" == name || $"local_{i}" == name)
+            {
+                value = frame.Locals[idx];
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     private static string FormatValue(Value v)
     {

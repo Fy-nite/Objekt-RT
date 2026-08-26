@@ -19,7 +19,8 @@ public sealed class DapProgram
 /// Loads (typically: compiles) the launch target for a <see cref="DapServer"/>.
 /// Implemented by hosts so the adapter itself stays language-agnostic: a
 /// frontend compiles its own sources and wires any host handlers it needs,
-/// then hands back an interpreter.
+/// then hands back an interpreter. Guest console output reaches the debug
+/// console by routing it through the supplied output handler.
 /// </summary>
 public interface IDapProgramLoader
 {
@@ -30,8 +31,11 @@ public interface IDapProgramLoader
     /// stderr and terminates the session. Any other exception is treated as an
     /// adapter crash.
     /// </summary>
-    Task<DapProgram> LoadAsync(string program, CancellationToken ct);
+    Task<DapProgram> LoadAsync(string program, DapOutputHandler? output, CancellationToken ct);
 }
+
+/// <summary>Receives guest program output as ("stdout" | "stderr", text).</summary>
+public delegate void DapOutputHandler(string category, string text);
 
 /// <summary>An expected failure while loading a program (compile errors, unreadable input).</summary>
 public sealed class DapLoadException : Exception

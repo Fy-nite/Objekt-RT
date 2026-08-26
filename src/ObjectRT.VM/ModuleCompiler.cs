@@ -216,6 +216,12 @@ public class ModuleCompiler
         // Copy the field name → index map for static-field reflection.
         mod.FieldMap = new Dictionary<string, uint>(_fieldMap);
 
+        // Build the O(1) type-name → index map (must happen after Types are populated).
+        mod.BuildTypeNameMap();
+
+        // Build per-type vtables for O(1) virtual dispatch.
+        mod.BuildVTables();
+
         return mod;
     }
 
@@ -640,6 +646,10 @@ public class ModuleCompiler
             func.ParamTypeNames = method.Params.Select(p => src.Resolve(p.TypeIndex)).ToArray();
         if (method.SignatureIndex < src.StringPool.Count)
             func.ReturnTypeName = src.Resolve(method.SignatureIndex);
+        if (method.Params.Count > 0)
+            func.ParamNames = method.Params.Select(p => src.Resolve(p.NameIndex)).ToArray();
+        if (method.Locals.Count > 0)
+            func.LocalNames = method.Locals.Select(l => src.Resolve(l.NameIndex)).ToArray();
 
         var state = new CompileState();
 
