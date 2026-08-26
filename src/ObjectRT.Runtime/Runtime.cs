@@ -55,6 +55,13 @@ public sealed class Runtime : IHostedRuntime
     /// <summary>Explicitly registered native methods (fast path).</summary>
     private readonly Dictionary<string, Delegate> _nativeMethods = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// Pre-resolved direct native call table. Populated at startup with
+    /// builtins and resolver-bridged entries. Executors get a copy via
+    /// <see cref="AttachHostHandlers"/>.
+    /// </summary>
+    private readonly Dictionary<string, DirectNativeCall> _directNativeMethods = new(StringComparer.Ordinal);
+
     /// <summary>Pluggable resolver chain, tried after explicit registry.</summary>
     private readonly List<INativeResolver> _resolvers = new();
 
@@ -334,10 +341,152 @@ public sealed class Runtime : IHostedRuntime
             (Func<object?, object?, object?, object?>)((list, fn, seed) => ListReduce(list, fn, seed)));
         RegisterNative("List.Reduce(3)",
             (Func<object?, object?, object?, object?>)((list, fn, seed) => ListReduce(list, fn, seed)));
+
+        // ── DirectNativeCall table (zero-allocation fast path) ────
+        // These bypass the ValueToObject/MarshalValue/DynamicInvoke dance.
+        // Args are on the stack: s[sp]=arg0, s[sp+1]=arg1, ...
+        // Callee pops argc values, pushes result, returns new sp.
+
+        _directNativeMethods["IO.Print"] = (x, s, sp) =>
+        {
+            var arg = s[sp];
+            Console.Write(arg.Tag == ValueTag.Str ? x.GetStringValue(arg.AsStr()) ?? "" : arg.ToString());
+            return sp; // void: no push
+        };
+
+        _directNativeMethods["IO.Println"] = (x, s, sp) =>
+        {
+            var arg = s[sp];
+            Console.WriteLine(arg.Tag == ValueTag.Str ? x.GetStringValue(arg.AsStr()) ?? "" : arg.ToString());
+            return sp; // void: no push
+        };
+
+        _directNativeMethods["IO.Readln"] = (x, s, sp) =>
+        {
+            s[sp] = Value.FromStr(x.InternString(Console.ReadLine() ?? ""));
+            return sp + 1;
+        };
+
+        _directNativeMethods["System.Console.WriteLine(string)"] = _directNativeMethods["IO.Println"];
+        _directNativeMethods["System.Console.Write(string)"] = _directNativeMethods["IO.Print"];
+
+        _directNativeMethods["System.Console.ReadLine"] = _directNativeMethods["IO.Readln"];
+
+        _directNativeMethods["System.Console.Clear"] = (x, s, sp) =>
+        {
+            Console.Clear();
+            return sp;
+        };
+
+        _directNativeMethods["System.String.Concat(string,string)"] = (x, s, sp) =>
+        {
+            var a = s[sp]; var b = s[sp + 1];
+            var sa = a.Tag == ValueTag.Str ? x.GetStringValue(a.AsStr()) ?? "" : a.ToString() ?? "";
+            var sb = b.Tag == ValueTag.Str ? x.GetStringValue(b.AsStr()) ?? "" : b.ToString() ?? "";
+            s[sp] = Value.FromStr(x.InternString(string.Concat(sa, sb)));
+            return sp + 1; // 1 result, 2 args consumed → net +1 - 2 = -1, but we wrote at sp
+        };
+
+        _directNativeMethods["System.String.IsNullOrEmpty(string)"] = (x, s, sp) =>
+        {
+            var arg = s[sp];
+            var str = arg.Tag == ValueTag.Str ? x.GetStringValue(arg.AsStr()) : arg.ToString();
+            s[sp] = Value.FromI4(string.IsNullOrEmpty(str) ? 1 : 0);
+            return sp + 1;
+        };
+
+        _directNativeMethods["Thread.Spawn"] = (x, s, sp) =>
+        {
+            var handle = s[sp].AsObj();
+            SpawnThread(handle);
+            s[sp] = Value.Nil();
+            return sp + 1;
+        };
+        _directNativeMethods["Thread.Spawn(1)"] = _directNativeMethods["Thread.Spawn"];
+
+        _directNativeMethods["Thread.Create"] = (x, s, sp) =>
+        {
+            s[sp] = Value.FromObj(x.State.InternExternal(new ThreadHandle(s[sp].AsObj())));
+            return sp + 1;
+        };
+        _directNativeMethods["Thread.Create(1)"] = _directNativeMethods["Thread.Create"];
+
+        _directNativeMethods["Thread.Start"] = (x, s, sp) =>
+        {
+            var th = x.State.GetExternal(s[sp].AsObj()) as ThreadHandle
+                ?? throw new ArgumentException("Thread argument must be a Thread.Create() handle.");
+            StartThread(th);
+            return sp;
+        };
+        _directNativeMethods["Thread.Start(1)"] = _directNativeMethods["Thread.Start"];
+
+        _directNativeMethods["Thread.Join"] = (x, s, sp) =>
+        {
+            var th = x.State.GetExternal(s[sp].AsObj()) as ThreadHandle
+                ?? throw new ArgumentException("Thread argument must be a Thread.Create() handle.");
+            th.Join();
+            return sp;
+        };
+        _directNativeMethods["Thread.Join(1)"] = _directNativeMethods["Thread.Join"];
+
+        _directNativeMethods["Thread.IsAlive"] = (x, s, sp) =>
+        {
+            var th = x.State.GetExternal(s[sp].AsObj()) as ThreadHandle
+                ?? throw new ArgumentException("Thread argument must be a Thread.Create() handle.");
+            s[sp] = Value.FromI4(th.IsAlive ? 1 : 0);
+            return sp + 1;
+        };
+        _directNativeMethods["Thread.IsAlive(1)"] = _directNativeMethods["Thread.IsAlive"];
+
+        _directNativeMethods["List.Map"] = (x, s, sp) =>
+        {
+            var list = x.State.GetExternal(s[sp].AsObj()) as global::System.Collections.Generic.List<object>
+                ?? throw new ArgumentException("List.Map/Filter/Reduce expect a List created with List.Create().");
+            var fnHandle = s[sp + 1].AsObj();
+            var result = new global::System.Collections.Generic.List<object>();
+            foreach (var item in list)
+                result.Add(InvokeDelegate(fnHandle, item)!);
+            s[sp] = Value.FromObj(x.State.InternExternal(result));
+            return sp + 1;
+        };
+        _directNativeMethods["List.Map(2)"] = _directNativeMethods["List.Map"];
+
+        _directNativeMethods["List.Filter"] = (x, s, sp) =>
+        {
+            var list = x.State.GetExternal(s[sp].AsObj()) as global::System.Collections.Generic.List<object>
+                ?? throw new ArgumentException("List.Map/Filter/Reduce expect a List created with List.Create().");
+            var fnHandle = s[sp + 1].AsObj();
+            var result = new global::System.Collections.Generic.List<object>();
+            foreach (var item in list)
+            {
+                if (Convert.ToBoolean(InvokeDelegate(fnHandle, item), global::System.Globalization.CultureInfo.InvariantCulture))
+                    result.Add(item);
+            }
+            s[sp] = Value.FromObj(x.State.InternExternal(result));
+            return sp + 1;
+        };
+        _directNativeMethods["List.Filter(2)"] = _directNativeMethods["List.Filter"];
+
+        _directNativeMethods["List.Reduce"] = (x, s, sp) =>
+        {
+            var list = x.State.GetExternal(s[sp].AsObj()) as global::System.Collections.Generic.List<object>
+                ?? throw new ArgumentException("List.Map/Filter/Reduce expect a List created with List.Create().");
+            var fnHandle = s[sp + 1].AsObj();
+            object? acc = s[sp + 2];
+            foreach (var item in list)
+                acc = InvokeDelegate(fnHandle, acc, item);
+            s[sp] = acc is Value v ? v : x.MarshalValue(acc);
+            return sp + 1;
+        };
+        _directNativeMethods["List.Reduce(3)"] = _directNativeMethods["List.Reduce"];
     }
 
     private static global::System.Collections.Generic.List<object> RequireList(object? list)
         => list as global::System.Collections.Generic.List<object>
+           ?? throw new ArgumentException("List.Map/Filter/Reduce expect a List created with List.Create().");
+
+    private static global::System.Collections.Generic.List<object> RequireList(uint handle, ExecutorState state)
+        => state.GetExternal(handle) as global::System.Collections.Generic.List<object>
            ?? throw new ArgumentException("List.Map/Filter/Reduce expect a List created with List.Create().");
 
     private static uint RequireDelegate(object? fn)
@@ -385,9 +534,18 @@ public sealed class Runtime : IHostedRuntime
         return new ThreadHandle(h);
     }
 
+    /// <summary>Create a ThreadHandle from a raw delegate heap handle.</summary>
+    private static ThreadHandle CreateThreadObj(uint delegateHandle)
+        => new ThreadHandle(delegateHandle);
+
     /// <summary>Coerces a native argument to a <see cref="ThreadHandle"/>.</summary>
     private static ThreadHandle RequireThread(object? t)
         => t as ThreadHandle
+           ?? throw new ArgumentException("Thread argument must be a Thread.Create() handle.");
+
+    /// <summary>Get a ThreadHandle from an external object handle.</summary>
+    private static ThreadHandle RequireThreadObj(uint handle, ExecutorState state)
+        => state.GetExternal(handle) as ThreadHandle
            ?? throw new ArgumentException("Thread argument must be a Thread.Create() handle.");
 
     /// <summary>
@@ -693,6 +851,13 @@ public sealed class Runtime : IHostedRuntime
     public void RegisterNative(string signature, Action method)
         => _nativeMethods[signature] = method;
 
+    /// <summary>
+    /// Register a <see cref="DirectNativeCall"/> for the fast path. The
+    /// delegate operates directly on the VM stack with no marshaling.
+    /// </summary>
+    public void RegisterDirectNative(string name, DirectNativeCall call)
+        => _directNativeMethods[name] = call;
+
     // ── Calling methods ────────────────────────────────────────────
 
     /// <summary>
@@ -822,10 +987,16 @@ public sealed class Runtime : IHostedRuntime
     /// <summary>
     /// Wires the host's native-call resolver onto an externally created
     /// executor (e.g. a debug interpreter driven outside LoadModule/Run).
+    /// Populates both the legacy <see cref="NativeCallHandler"/> and the
+    /// fast-path <see cref="IExecutor.DirectCalls"/> table.
     /// </summary>
     public void AttachHostHandlers(IExecutor vm)
     {
         vm.NativeCallHandler = ResolveNativeCall;
+
+        // Populate the DirectCalls table: builtins first, then resolver-bridged.
+        foreach (var kv in _directNativeMethods)
+            vm.DirectCalls[kv.Key] = kv.Value;
     }
 
     private IExecutor CreateExecutor(CompiledModule mod)

@@ -54,6 +54,8 @@ public sealed class Interpreter : ExecutorBase
     private readonly List<Value> _stack = new(4096);
     private readonly List<Frame> _frames = new(256);
     private Value[] _localsScratch = Array.Empty<Value>();
+    /// <summary>Reusable backing array for DirectNativeCall fast path.</summary>
+    private Value[] _directStack = new Value[256];
     private string _currentFuncName = "";
     private uint _currentPc;
     private bool _trace;
@@ -331,19 +333,56 @@ public sealed class Interpreter : ExecutorBase
                         }
 
                         var handler = NativeCallHandler;
-                        if (handler == null) return Err(VmErrorKind.UnresolvedMethod, $"call '{name}': no native handler");
                         if (_stack.Count < argc) return Err(VmErrorKind.StackUnderflow, $"call '{name}': need {argc} args, have {_stack.Count}");
 
-                        var args = new object?[argc];
+                        // ── Fast path: DirectNativeCall (no boxing, no allocation) ──
+                        // Skip for struct types — they need special marshaling in the slow path.
                         var paramTypes = nativeStub?.ParamTypeNames;
+                        bool hasStructParams = false;
+                        if (paramTypes is { Length: > 0 })
+                        {
+                            for (int pi = 0; pi < paramTypes.Length && pi < argc; pi++)
+                            {
+                                if (StructMarshaller.IsStructType(Mod, paramTypes[pi]))
+                                { hasStructParams = true; break; }
+                            }
+                        }
+                        if (!hasStructParams && DirectCalls.TryGetValue(name, out var directCall))
+                        {
+                            // Ensure backing array is large enough
+                            if (_directStack.Length < _stack.Count)
+                                _directStack = new Value[Math.Max(_directStack.Length * 2, _stack.Count)];
+
+                            // Copy stack tail (the args) into backing array
+                            int spBase = _stack.Count - argc;
+                            for (int i = 0; i < argc; i++)
+                                _directStack[i] = _stack[spBase + i];
+
+                            int newSp;
+                            try { newSp = directCall(this, _directStack, 0); }
+                            catch (VmRuntimeException vre) { return vre.Error; }
+                            catch (Exception ex) { return Err(VmErrorKind.RuntimeError, $"call '{name}': {ex.Message}"); }
+
+                            // Sync backing array → List stack: remove args, push results
+                            _stack.RemoveRange(spBase, argc);
+                            for (int i = 0; i < newSp; i++)
+                                _stack.Add(_directStack[i]);
+                            break;
+                        }
+
+                        // ── Slow path: legacy NativeCallHandler with marshaling ──
+                        if (handler == null) return Err(VmErrorKind.UnresolvedMethod, $"call '{name}': no native handler");
+
+                        var args = new object?[argc];
+                        var slowParamTypes = nativeStub?.ParamTypeNames;
                         for (int ai = argc - 1; ai >= 0; ai--)
                         {
                             var v = Pop();
                             // Struct params flow to the bridge as C-layout bytes
                             // (the bridge converts them to blittable C# structs).
-                            if (paramTypes is { Length: > 0 } && ai < paramTypes.Length && StructMarshaller.IsStructType(Mod, paramTypes[ai]))
+                            if (slowParamTypes is { Length: > 0 } && ai < slowParamTypes.Length && StructMarshaller.IsStructType(Mod, slowParamTypes[ai]))
                             {
-                                var packed = StructMarshaller.Pack(Mod, this, paramTypes[ai], v);
+                                var packed = StructMarshaller.Pack(Mod, this, slowParamTypes[ai], v);
                                 if (packed.IsError) return packed.Error;
                                 args[ai] = packed.Value;
                             }

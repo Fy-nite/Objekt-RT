@@ -31,6 +31,9 @@ public abstract class ExecutorBase : IExecutor
         set => _nativeCall = value;
     }
 
+    /// <inheritdoc />
+    public Dictionary<string, DirectNativeCall> DirectCalls { get; } = new(StringComparer.Ordinal);
+
     /// <summary>
     /// When non-null, the interpreter/JIT increments a count each time a
     /// module function is entered. The dictionary maps
@@ -105,5 +108,55 @@ public abstract class ExecutorBase : IExecutor
         // receiver's concrete chain (ExecutorState.ObjectTypes).
         State.RecordObjectType(handle, (int)typeIdx);
         return handle;
+    }
+
+    // ── DirectNativeCall bridge ───────────────────────────────────
+
+    /// <summary>
+    /// Wrap a legacy <see cref="NativeCallHandler"/> into a
+    /// <see cref="DirectNativeCall"/> delegate. The bridge pops
+    /// <paramref name="argc"/> values from the stack, converts them
+    /// via <see cref="ValueToObject"/>, calls the handler, and pushes
+    /// the result via <see cref="MarshalValue"/>.
+    /// </summary>
+    public DirectNativeCall WrapLegacyNativeCall(string name, int argc)
+    {
+        return (x, s, sp) =>
+        {
+            var handler = x.NativeCallHandler
+                ?? throw new VmRuntimeException(new VmError(VmErrorKind.UnresolvedMethod, $"'{name}': no native handler"));
+            var args = new object?[argc];
+            for (int i = 0; i < argc; i++)
+                args[i] = x.ValueToObject(s[sp + i]);
+            var result = handler(name, args);
+            var newSp = sp - argc;
+            s[newSp++] = x.MarshalValue(result);
+            return newSp;
+        };
+    }
+
+    /// <summary>
+    /// Invoke a <see cref="DirectNativeCall"/> from JIT-generated code.
+    /// Copies args from the JIT's local stack into an internal backing array,
+    /// calls the direct native, and copies results back.
+    /// Returns the new stack pointer.
+    /// </summary>
+    public int InvokeDirectNative(string name, Value[] jitStack, int sp, int argc)
+    {
+        if (!DirectCalls.TryGetValue(name, out var call))
+            throw new VmRuntimeException(new VmError(VmErrorKind.UnresolvedMethod, $"'{name}': no direct native call"));
+
+        // Copy args from JIT stack into backing array
+        var args = new Value[argc];
+        for (int i = 0; i < argc; i++)
+            args[i] = jitStack[sp + i];
+
+        int newSp = call(this, args, 0);
+
+        // Copy results back to JIT stack
+        for (int i = 0; i < newSp; i++)
+            jitStack[sp + i] = args[i];
+
+        return sp + newSp;
     }
 }

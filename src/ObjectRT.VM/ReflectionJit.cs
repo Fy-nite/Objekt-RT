@@ -185,10 +185,11 @@ public sealed class ReflectionJit : ExecutorBase
 
         sb.Append($"public static Value {SafeMethodName(func.DebugName)}(IExecutor e, Value[] args) {{");
         sb.AppendLine();
-        sb.AppendLine("    var exec = (ExecutorBase)e;");
+        sb.AppendLine("    var x = (ExecutorBase)e;");
         sb.AppendLine($"    var s = new Value[{func.MaxStack + 8}]; int sp = 0;");
 
         // Emit opcodes
+        bool lastWasRet = false;
         pc = 0;
         while (pc < code.Length)
         {
@@ -197,12 +198,14 @@ public sealed class ReflectionJit : ExecutorBase
                 sb.AppendLine($"    L_{pos}:");
 
             ushort op = Interpreter.ReadOpcode(code, ref pc);
+            lastWasRet = (Opcode)op == Opcode.Ret;
             EmitOp(sb, func, mod, code, ref pc, op, targets, pos);
             sb.AppendLine();
-            if ((Opcode)op == Opcode.Ret) break;
+            if (lastWasRet) break;
         }
 
-        sb.AppendLine("    return Value.Nil();");
+        if (!lastWasRet)
+            sb.AppendLine("    return Value.Nil();");
         sb.AppendLine("    }");
         return sb.ToString();
     }
@@ -223,7 +226,7 @@ public sealed class ReflectionJit : ExecutorBase
             case Opcode.LdcR8:
                 { double v = Interpreter.ReadF64(code, ref pc); sb.Append($"    s[sp++] = Value.FromR8({FD(v)}d);"); break; }
             case Opcode.Ldstr:
-                { ushort si = Interpreter.ReadU16(code, ref pc); sb.Append($"    s[sp++] = Value.FromStr(e.InternString(\"{CS(mod.GetString(si))}\"));"); break; }
+                { ushort si = Interpreter.ReadU16(code, ref pc); sb.Append($"    s[sp++] = Value.FromStr({si});"); break; }
 
             case Opcode.Ldarg:
                 { ushort ai = Interpreter.ReadU16(code, ref pc); sb.Append($"    s[sp++] = args[{ai}];"); break; }
@@ -234,11 +237,11 @@ public sealed class ReflectionJit : ExecutorBase
             case Opcode.Stloc:
                 { ushort li = Interpreter.ReadU16(code, ref pc); sb.Append($"    args[{func.NumParams + li}] = s[--sp];"); break; }
 
-            case Opcode.Add: sb.Append("    { var b=s[--sp]; var a=s[--sp]; s[sp++]=Interpreter.Arith(a,b,Interpreter.I4Add,Interpreter.I8Add,Interpreter.R4Add,Interpreter.R8Add); }"); break;
-            case Opcode.Sub: sb.Append("    { var b=s[--sp]; var a=s[--sp]; s[sp++]=Interpreter.Arith(a,b,Interpreter.I4Sub,Interpreter.I8Sub,Interpreter.R4Sub,Interpreter.R8Sub); }"); break;
-            case Opcode.Mul: sb.Append("    { var b=s[--sp]; var a=s[--sp]; s[sp++]=Interpreter.Arith(a,b,Interpreter.I4Mul,Interpreter.I8Mul,Interpreter.R4Mul,Interpreter.R8Mul); }"); break;
-            case Opcode.Div: sb.Append("    { var b=s[--sp]; var a=s[--sp]; s[sp++]=Interpreter.Arith(a,b,Interpreter.I4Div,Interpreter.I8Div,Interpreter.R4Div,Interpreter.R8Div); }"); break;
-            case Opcode.Rem: sb.Append("    { var b=s[--sp]; var a=s[--sp]; s[sp++]=Interpreter.Arith(a,b,Interpreter.I4Rem,Interpreter.I8Rem,Interpreter.R4Rem,Interpreter.R8Rem); }"); break;
+            case Opcode.Add: sb.Append("    { var b=s[--sp]; var a=s[--sp]; s[sp++]=Interpreter.I4Arith(a,b,Interpreter.I4Add,Interpreter.I8Add,Interpreter.R4Add,Interpreter.R8Add); }"); break;
+            case Opcode.Sub: sb.Append("    { var b=s[--sp]; var a=s[--sp]; s[sp++]=Interpreter.I4Arith(a,b,Interpreter.I4Sub,Interpreter.I8Sub,Interpreter.R4Sub,Interpreter.R8Sub); }"); break;
+            case Opcode.Mul: sb.Append("    { var b=s[--sp]; var a=s[--sp]; s[sp++]=Interpreter.I4Arith(a,b,Interpreter.I4Mul,Interpreter.I8Mul,Interpreter.R4Mul,Interpreter.R8Mul); }"); break;
+            case Opcode.Div: sb.Append("    { var b=s[--sp]; var a=s[--sp]; s[sp++]=Interpreter.I4Arith(a,b,Interpreter.I4Div,Interpreter.I8Div,Interpreter.R4Div,Interpreter.R8Div); }"); break;
+            case Opcode.Rem: sb.Append("    { var b=s[--sp]; var a=s[--sp]; s[sp++]=Interpreter.I4Arith(a,b,Interpreter.I4Rem,Interpreter.I8Rem,Interpreter.R4Rem,Interpreter.R8Rem); }"); break;
             case Opcode.Neg: sb.Append("    { var v=s[--sp]; s[sp++]=Interpreter.Negate(v); }"); break;
 
             case Opcode.And: sb.Append("    { int b=s[--sp].I4, a=s[--sp].I4; s[sp++]=Value.FromI4(a&b); }"); break;
@@ -258,19 +261,16 @@ public sealed class ReflectionJit : ExecutorBase
             case Opcode.Ldnull: sb.Append("    s[sp++] = Value.Nil();"); break;
 
             case Opcode.Ldsfld:
-                { ushort fi = Interpreter.ReadU16(code, ref pc); sb.Append($"    s[sp++] = exec.StaticFields[{fi}];"); break; }
+                { ushort fi = Interpreter.ReadU16(code, ref pc); sb.Append($"    s[sp++] = x.StaticFields[{fi}];"); break; }
             case Opcode.Stsfld:
-                { ushort fi = Interpreter.ReadU16(code, ref pc); sb.Append($"    exec.StaticFields[{fi}] = s[--sp];"); break; }
+                { ushort fi = Interpreter.ReadU16(code, ref pc); sb.Append($"    x.StaticFields[{fi}] = s[--sp];"); break; }
 
             case Opcode.Call: case Opcode.Callvirt: case Opcode.NativeCall:
             {
                 ushort si = Interpreter.ReadU16(code, ref pc);
                 ushort argc = Interpreter.ReadU16(code, ref pc);
                 string name = mod.GetString(si);
-                sb.Append($"    {{ var a=new object?[{argc}];");
-                for (int ai = argc - 1; ai >= 0; ai--)
-                    sb.Append($"a[{ai}]=e.ValueToObject(s[--sp]);");
-                sb.Append($"s[sp++]=e.MarshalValue(e.NativeCallHandler!(\"{CS(name)}\",a)); }}");
+                sb.Append($"    try {{ sp = x.InvokeDirectNative(\"{CS(name)}\", s, sp - {argc}, {argc}); }} catch (VmRuntimeException ex) {{ return ex.Error; }} catch (Exception ex) {{ return new VmError(VmErrorKind.RuntimeError, $\"call '{CS(name)}': {{ex.Message}}\"); }}");
                 break;
             }
 
@@ -290,21 +290,21 @@ public sealed class ReflectionJit : ExecutorBase
             case Opcode.Newobj:
             {
                 ushort ti = Interpreter.ReadU16(code, ref pc);
-                sb.Append($"    {{ var _ar = exec.AllocObject({ti}); if (_ar.IsError) return _ar.Error; s[sp++] = Value.FromObj(_ar.Value); }}");
+                sb.Append($"    {{ var _ar = x.AllocObject({ti}); if (_ar.IsError) return _ar.Error; s[sp++] = Value.FromObj(_ar.Value); }}");
                 break;
             }
 
             case Opcode.Ldfld:
             {
                 ushort fi = Interpreter.ReadU16(code, ref pc);
-                sb.Append($"    {{ var _o = s[--sp]; uint _h = _o.AsObj(); s[sp++] = MemoryMarshal.Read<Value>(exec.Heap[(int)_h].AsSpan((int){mod.Fields[(int)fi].Offset}, 16)); }}");
+                sb.Append($"    {{ var _o = s[--sp]; s[sp++] = MemoryMarshal.Read<Value>(x.Heap[(int)_o.AsObj()].AsSpan((int){mod.Fields[(int)fi].Offset}, 16)); }}");
                 break;
             }
 
             case Opcode.Stfld:
             {
                 ushort fi = Interpreter.ReadU16(code, ref pc);
-                sb.Append($"    {{ var _v = s[--sp]; var _o = s[--sp]; uint _h = _o.AsObj(); MemoryMarshal.Write(exec.Heap[(int)_h].AsSpan((int){mod.Fields[(int)fi].Offset}, 16), in _v); }}");
+                sb.Append($"    {{ var _v = s[--sp]; var _o = s[--sp]; MemoryMarshal.Write(x.Heap[(int)_o.AsObj()].AsSpan((int){mod.Fields[(int)fi].Offset}, 16), in _v); }}");
                 break;
             }
 
@@ -312,28 +312,28 @@ public sealed class ReflectionJit : ExecutorBase
 
             case Opcode.Newarr:
             {
-                Interpreter.ReadU16(code, ref pc);  // element type (informational)
-                sb.Append("    { var _len = s[--sp]; var _arr = new object[_len.I4]; s[sp++] = Value.FromObj(exec.State.InternExternal(_arr)); }");
+                Interpreter.ReadU16(code, ref pc);
+                sb.Append("    { var _len = s[--sp]; s[sp++] = Value.FromObj(x.State.InternExternal(new object[_len.I4])); }");
                 break;
             }
 
             case Opcode.Ldelem:
             {
-                sb.Append("    { var _idx = s[--sp]; var _arrV = s[--sp]; var _a = (System.Array)exec.State.GetExternal(_arrV.AsObj()); s[sp++] = e.MarshalValue(_a.GetValue(_idx.I4)); }");
+                sb.Append("    { var _idx = s[--sp]; var _a = (System.Array)x.State.GetExternal(s[--sp].AsObj()); s[sp++] = x.MarshalValue(_a.GetValue(_idx.I4)); }");
                 break;
             }
 
             case Opcode.Stelem:
             {
-                sb.Append("    { var _v = s[--sp]; var _idx = s[--sp]; var _arrV = s[--sp]; var _a = (System.Array)exec.State.GetExternal(_arrV.AsObj()); _a.SetValue(e.ValueToObject(_v), _idx.I4); }");
+                sb.Append("    { var _v = s[--sp]; var _idx = s[--sp]; ((System.Array)x.State.GetExternal(s[--sp].AsObj())).SetValue(x.ValueToObject(_v), _idx.I4); }");
                 break;
             }
 
             // ── Type ops (no-ops in the dynamic VM) ────────────
 
             case Opcode.Conv: case Opcode.Castclass: case Opcode.Isinst:
-                Interpreter.ReadU16(code, ref pc);  // type index (informational)
-                sb.Append("    // conv/cast (no-op in dynamic VM)");
+                Interpreter.ReadU16(code, ref pc);
+                sb.Append("    // conv/cast (no-op)");
                 break;
 
             // ── Structured control flow (markers — actual branching is br/brtrue/brfalse) ──
@@ -341,13 +341,13 @@ public sealed class ReflectionJit : ExecutorBase
             case Opcode.If: case Opcode.While:
             {
                 byte ck = code[pc++];
-                if (ck == 0x01) pc++;                  // comparison byte
-                else if (ck >= 0x02)                  // Expression or Block
+                if (ck == 0x01) pc++;
+                else if (ck >= 0x02)
                 {
                     uint len = Interpreter.ReadU32(code, ref pc);
                     pc += len;
                 }
-                sb.Append($"    // {(Opcode)op} marker (branching already compiled to br/brtrue/brfalse)");
+                sb.Append($"    // {(Opcode)op} marker");
                 break;
             }
 
