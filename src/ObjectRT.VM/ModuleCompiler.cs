@@ -216,6 +216,12 @@ public class ModuleCompiler
         // Copy the field name → index map for static-field reflection.
         mod.FieldMap = new Dictionary<string, uint>(_fieldMap);
 
+        // Build the O(1) type-name → index map (must happen after Types are populated).
+        mod.BuildTypeNameMap();
+
+        // Build per-type vtables for O(1) virtual dispatch.
+        mod.BuildVTables();
+
         return mod;
     }
 

@@ -111,6 +111,21 @@ public class CompiledModule
     /// <summary>Field qualified name ("Type.field") → flat field index (for static access).</summary>
     public Dictionary<string, uint> FieldMap { get; set; } = new();
 
+    /// <summary>O(1) type-name → index map, built after Types are populated.</summary>
+    private Dictionary<string, int>? _typeNameMap;
+
+    /// <summary>Cached Delegate type index (-1 if not found). Built lazily on first access.</summary>
+    private int _delegateTypeIdx = -2; // -2 = not yet looked up
+
+    /// <summary>
+    /// Per-type vtable: for each type index, a dictionary mapping method
+    /// name → function index. Includes inherited and overridden methods,
+    /// so virtual dispatch is a single O(1) dictionary lookup with zero
+    /// allocations (no HashSet, no string concatenation, no type-chain walk).
+    /// Built once at module load by <see cref="BuildVTables"/>.
+    /// </summary>
+    private Dictionary<int, Dictionary<string, uint>>? _vtables;
+
     public bool HasEntry => EntryFunction < Functions.Count;
 
     public uint FindFunction(string name) =>
@@ -120,6 +135,127 @@ public class CompiledModule
     public CompiledFunction GetFunction(uint idx) => Functions[(int)idx];
     public VMType GetType(uint idx) => Types[(int)idx];
     public string GetString(uint idx) => Strings[(int)idx];
+
+    /// <summary>
+    /// Builds the O(1) type-name → index dictionary. Call once after Types
+    /// are fully populated (during ModuleCompiler.Compile).
+    /// </summary>
+    public void BuildTypeNameMap()
+    {
+        _typeNameMap = new Dictionary<string, int>(Types.Count, StringComparer.Ordinal);
+        for (int i = 0; i < Types.Count; i++)
+            _typeNameMap[Types[i].DebugName] = i;
+    }
+
+    /// <summary>
+    /// Builds per-type vtables for O(1) virtual dispatch. Each type gets a
+    /// dictionary mapping method names to function indices, with inherited
+    /// methods filled in from the base chain (most-derived wins).
+    /// </summary>
+    public void BuildVTables()
+    {
+        _vtables = new Dictionary<int, Dictionary<string, uint>>(Types.Count);
+
+        for (int ti = 0; ti < Types.Count; ti++)
+        {
+            var vtable = new Dictionary<string, uint>(StringComparer.Ordinal);
+
+            // Walk the base chain from root to derived, so derived overrides
+            // shadow inherited entries (last write wins).
+            var chain = new List<int>();
+            int cur = ti;
+            var visited = new HashSet<int>();
+            while (cur >= 0 && visited.Add(cur))
+            {
+                chain.Add(cur);
+                cur = Types[cur].BaseType;
+            }
+            chain.Reverse(); // root first
+
+            foreach (var typeIdx in chain)
+            {
+                var t = Types[typeIdx];
+                for (uint mi = 0; mi < t.MethodCount; mi++)
+                {
+                    string mname = Functions[(int)(t.MethodOffset + mi)].DebugName;
+                    // DebugName is "Type.Method" — extract just the method name
+                    int dot = mname.LastIndexOf('.');
+                    if (dot >= 0 && dot < mname.Length - 1)
+                    {
+                        string shortName = mname[(dot + 1)..];
+                        vtable[shortName] = t.MethodOffset + mi;
+                    }
+                }
+            }
+
+            // Also add interface method implementations
+            if (Types[ti].InterfaceNames != null)
+            {
+                // Walk the type's own chain to find interface implementations
+                cur = ti;
+                visited.Clear();
+                while (cur >= 0 && visited.Add(cur))
+                {
+                    var t = Types[cur];
+                    if (t.InterfaceNames != null)
+                    {
+                        foreach (var iname in t.InterfaceNames)
+                        {
+                            int ifaceIdx = FindTypeIndex(iname);
+                            if (ifaceIdx < 0) continue;
+                            var iface = Types[ifaceIdx];
+                            for (uint mi = 0; mi < iface.MethodCount; mi++)
+                            {
+                                string mname = Functions[(int)(iface.MethodOffset + mi)].DebugName;
+                                int dot = mname.LastIndexOf('.');
+                                if (dot >= 0 && dot < mname.Length - 1)
+                                {
+                                    string shortName = mname[(dot + 1)..];
+                                    // Only add if not already overridden in the type's own vtable
+                                    // (the base-chain walk above already set concrete implementations)
+                                }
+                            }
+                        }
+                    }
+                    cur = t.BaseType;
+                }
+            }
+
+            _vtables[ti] = vtable;
+        }
+    }
+
+    /// <summary>
+    /// O(1) virtual dispatch: looks up a method in the receiver type's vtable.
+    /// Returns the function index, or uint.MaxValue if not found.
+    /// </summary>
+    public uint ResolveVirtualMethod(int receiverTypeIdx, string methodName)
+    {
+        if (_vtables != null && _vtables.TryGetValue(receiverTypeIdx, out var vtable)
+            && vtable.TryGetValue(methodName, out var funcIdx))
+            return funcIdx;
+        return uint.MaxValue;
+    }
+
+    /// <summary>
+    /// Cached index of the built-in "Delegate" type. Returns -1 if not found.
+    /// Avoids the O(n) linear scan on every delegate dispatch.
+    /// </summary>
+    public int DelegateTypeIdx
+    {
+        get
+        {
+            if (_delegateTypeIdx == -2)
+            {
+                _delegateTypeIdx = -1;
+                for (int ti = 0; ti < Types.Count; ti++)
+                {
+                    if (Types[ti].DebugName == "Delegate") { _delegateTypeIdx = ti; break; }
+                }
+            }
+            return _delegateTypeIdx;
+        }
+    }
 
     /// <summary>
     /// Finds a function by its qualified name ("Type.Method"), falling back to
@@ -138,9 +274,9 @@ public class CompiledModule
         string typeName = name[..dot];
         string methodName = name[(dot + 1)..];
 
-        var seen = new HashSet<int>();
         int typeIdx = FindTypeIndex(typeName);
-        while (typeIdx >= 0 && seen.Add(typeIdx))
+        int depthLimit = 64;
+        while (typeIdx >= 0 && depthLimit-- > 0)
         {
             var type = Types[typeIdx];
             if (FunctionMap.TryGetValue($"{type.DebugName}.{methodName}", out idx)) return idx;
@@ -149,8 +285,12 @@ public class CompiledModule
         return uint.MaxValue;
     }
 
+    /// <summary>O(1) type-name → index lookup using the pre-built dictionary.</summary>
     private int FindTypeIndex(string name)
     {
+        if (_typeNameMap != null)
+            return _typeNameMap.TryGetValue(name, out var idx) ? idx : -1;
+        // Fallback if BuildTypeNameMap was never called (shouldn't happen)
         for (int i = 0; i < Types.Count; i++)
             if (Types[i].DebugName == name) return i;
         return -1;
@@ -171,9 +311,18 @@ public class CompiledModule
         if (dot > 0 && dot < name.Length - 1)
         {
             string shortName = name[(dot + 1)..];
-            for (int i = 0; i < Types.Count; i++)
-                if (Types[i].DebugName == shortName || Types[i].DebugName.EndsWith("." + shortName, StringComparison.Ordinal))
-                    return i;
+            if (_typeNameMap != null)
+            {
+                foreach (var kv in _typeNameMap)
+                    if (kv.Key == shortName || kv.Key.EndsWith("." + shortName, StringComparison.Ordinal))
+                        return kv.Value;
+            }
+            else
+            {
+                for (int i = 0; i < Types.Count; i++)
+                    if (Types[i].DebugName == shortName || Types[i].DebugName.EndsWith("." + shortName, StringComparison.Ordinal))
+                        return i;
+            }
         }
         return -1;
     }

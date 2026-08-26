@@ -60,12 +60,14 @@ public sealed class ExecutorState
         }
     }
 
+    /// <summary>
+    /// Resolves a string handle to its CLR string. The string list is append-only
+    /// after interning, so reads are safe without locking — the handle was valid
+    /// at the time the Value was created and can only be looked up after that point.
+    /// </summary>
     public string? GetStringValue(uint idx)
     {
-        lock (_stringLock)
-        {
-            return idx < _strings.Count ? _strings[(int)idx] : null;
-        }
+        return idx < _strings.Count ? _strings[(int)idx] : null;
     }
 
     // ── External (CLR) object handles ──────────────────────────────
@@ -93,10 +95,7 @@ public sealed class ExecutorState
     public object? GetExternal(uint handle)
     {
         uint idx = handle & ~ExternalHandleFlag;
-        lock (_externalLock)
-        {
-            return idx < _externals.Count ? _externals[(int)idx] : null;
-        }
+        return idx < _externals.Count ? _externals[(int)idx] : null;
     }
 
     /// <summary>True when an Obj-tag handle is an external CLR reference.</summary>
