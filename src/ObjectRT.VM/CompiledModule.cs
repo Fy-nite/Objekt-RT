@@ -108,6 +108,30 @@ public class CompiledModule
 
     public Dictionary<string, uint> FunctionMap { get; set; } = new();
 
+    /// <summary>
+    /// Constructor overloads, keyed by the type's wire (debug) name. Value is
+    /// the list of (function index, arg count incl. `this`) for that type's
+    /// constructors. The flat FunctionMap stores only ONE entry per `..ctor`
+    /// full-name (last-wins on overloads), so `new T(a,b)` could dispatch to
+    /// the wrong overload; argc-aware resolution consults this table instead.
+    /// Populated by <see cref="ModuleCompiler"/>.
+    /// </summary>
+    public Dictionary<string, (uint Func, uint ArgCount)[]> CtorOverloads { get; set; } = new();
+
+    /// <summary>
+    /// Resolves a constructor for the given type by argument count (including
+    /// the `this` receiver). Returns <see cref="uint.MaxValue"/> when no
+    /// overload matches.
+    /// </summary>
+    public uint ResolveCtor(string typeName, uint argc)
+    {
+        if (!CtorOverloads.TryGetValue(typeName, out var overloads))
+            return uint.MaxValue;
+        foreach (var (func, count) in overloads)
+            if (count == argc) return func;
+        return uint.MaxValue;
+    }
+
     /// <summary>Field qualified name ("Type.field") → flat field index (for static access).</summary>
     public Dictionary<string, uint> FieldMap { get; set; } = new();
 

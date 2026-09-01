@@ -340,7 +340,18 @@ public sealed class Interpreter : ExecutorBase
                             // Inheritance-aware: "Derived.Method" resolves to the
                             // most-derived declaration — the base chain is walked
                             // when the named type doesn't declare the method.
-                            uint cfi = Mod.ResolveFunction(name);
+                            uint cfi;
+                            if (name.EndsWith("..ctor", StringComparison.Ordinal))
+                            {
+                                // Overloaded ctors share the `..ctor` full-name and
+                                // last-wins in FunctionMap, so dispatch by arg count.
+                                string ctorType = name[..^"..ctor".Length];
+                                cfi = Mod.ResolveCtor(ctorType, argc);
+                            }
+                            else
+                            {
+                                cfi = Mod.ResolveFunction(name);
+                            }
 
                             // Virtual dispatch (callvirt only): refine through
                             // the RECEIVER's concrete type chain, so a call on

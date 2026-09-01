@@ -16,11 +16,25 @@ public class ModuleCompiler
     private readonly List<ResolvedFunction> _resolvedFuncs = new();
     private readonly Dictionary<string, uint> _funcMap = new();
 
+    /// <summary>
+    /// For each type (in <c>src.Types</c> order), the resolved-function index
+    /// where its method block starts. Filled by <see cref="BuildResolutionTables"/>
+    /// (methods are appended contiguously per type), so a type's methods occupy
+    /// <c>[_typeMethodStart[i], _typeMethodStart[i] + MethodCount)</c> in the flat
+    /// function table. This is the single source of truth for
+    /// <c>VMType.MethodOffset</c> — a name-keyed map cannot be used here because
+    /// overloaded methods (e.g. three constructors) share the same <c>FullName</c>
+    /// and last-wins under a dictionary.
+    /// </summary>
+    private readonly List<uint> _typeMethodStart = new();
+
     private struct ResolvedFunction
     {
         public string FullName;
         public uint OldMethodIdx;
         public uint NewIndex;
+        public int TypeIdx;
+        public int MethodIdx;
     }
 
     // ── Per-function compilation state ─────────────────────────────
@@ -120,13 +134,10 @@ public class ModuleCompiler
                     .ToArray();
             }
 
-            // Find method offset in the function table
-            for (int mi = 0; mi < srcType.Methods.Count; mi++)
-            {
-                string fname = MethodFullName(src, srcType, srcType.Methods[mi]);
-                if (_funcMap.TryGetValue(fname, out var funcIdx) && mi == 0)
-                    vmt.MethodOffset = funcIdx;
-            }
+            // Find method offset in the function table: methods of each type
+            // occupy a contiguous block in _resolvedFuncs, starting at the
+            // index recorded during BuildResolutionTables.
+            vmt.MethodOffset = typeIdx < _typeMethodStart.Count ? _typeMethodStart[typeIdx] : 0;
 
             mod.Types.Add(vmt);
 
@@ -147,30 +158,45 @@ public class ModuleCompiler
         }
 
         // 3. Compile functions
-        foreach (var rf in _resolvedFuncs)
+        for (int rfi = 0; rfi < _resolvedFuncs.Count; rfi++)
         {
+            var rf = _resolvedFuncs[rfi];
             bool found = false;
-            foreach (var srcType in src.Types)
-            {
-                for (int mi = 0; mi < srcType.Methods.Count; mi++)
-                {
-                    string fname = MethodFullName(src, srcType, srcType.Methods[mi]);
-                    if (fname == rf.FullName)
-                    {
-                        var cfResult = CompileMethod(src, srcType, srcType.Methods[mi], rf.FullName);
-                        if (cfResult.IsError)
-                            return new VmError(VmErrorKind.UnresolvedField,
-                                $"compilation of '{rf.FullName}' failed: {cfResult.Error.Message}");
 
-                        var cf = cfResult.Value;
-                        cf.SelfIndex = rf.NewIndex;
-                        mod.Functions.Add(cf);
-                        mod.FunctionMap[rf.FullName] = rf.NewIndex;
-                        found = true;
-                        break;
+            if (rf.TypeIdx >= 0 && rf.TypeIdx < src.Types.Count
+                && rf.MethodIdx >= 0 && rf.MethodIdx < src.Types[rf.TypeIdx].Methods.Count)
+            {
+                var srcType = src.Types[rf.TypeIdx];
+                var srcMethod = srcType.Methods[rf.MethodIdx];
+                var cfResult = CompileMethod(src, srcType, srcMethod, rf.FullName);
+                if (cfResult.IsError)
+                    return new VmError(VmErrorKind.UnresolvedField,
+                        $"compilation of '{rf.FullName}' failed: {cfResult.Error.Message}");
+
+                var cf = cfResult.Value;
+                cf.SelfIndex = rf.NewIndex;
+                mod.Functions.Add(cf);
+                mod.FunctionMap[rf.FullName] = rf.NewIndex;
+                found = true;
+
+                // Record a constructor overload so `new T(...)` can dispatch by
+                // arg count (overloaded ctors share the `..ctor` full-name in
+                // FunctionMap, which is last-wins).
+                if (rf.FullName.EndsWith("..ctor", StringComparison.Ordinal))
+                {
+                    string typeName = rf.FullName[..^"..ctor".Length];
+                    var overload = (Func: rf.NewIndex, ArgCount: (uint)srcMethod.ParamCount);
+                    if (mod.CtorOverloads.TryGetValue(typeName, out var existing))
+                    {
+                        Array.Resize(ref existing, existing.Length + 1);
+                        existing[^1] = overload;
                     }
+                    else
+                    {
+                        existing = new[] { overload };
+                    }
+                    mod.CtorOverloads[typeName] = existing;
                 }
-                if (found) break;
             }
 
             if (!found)
@@ -233,11 +259,15 @@ public class ModuleCompiler
         _fieldMap.Clear();
         _resolvedFuncs.Clear();
         _funcMap.Clear();
+        _typeMethodStart.Clear();
 
         foreach (var type in src.Types)
         {
             string tname = src.Resolve(type.NameIndex);
-            _typeMap[tname] = (uint)_typeMap.Count;
+            int typeIdx = _typeMap.Count;
+            _typeMap[tname] = (uint)typeIdx;
+
+            _typeMethodStart.Add((uint)_resolvedFuncs.Count);
 
             foreach (var field in type.Fields)
             {
@@ -245,13 +275,16 @@ public class ModuleCompiler
                 _fieldMap[fname] = (uint)_fieldMap.Count;
             }
 
-            foreach (var method in type.Methods)
+            for (int mi = 0; mi < type.Methods.Count; mi++)
             {
+                var method = type.Methods[mi];
                 var rf = new ResolvedFunction
                 {
                     FullName = MethodFullName(src, type, method),
                     OldMethodIdx = (uint)_resolvedFuncs.Count,
                     NewIndex = (uint)_resolvedFuncs.Count,
+                    TypeIdx = typeIdx,
+                    MethodIdx = mi,
                 };
                 _funcMap[rf.FullName] = rf.NewIndex;
                 _resolvedFuncs.Add(rf);
