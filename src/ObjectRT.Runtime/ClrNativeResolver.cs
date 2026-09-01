@@ -1,7 +1,9 @@
 using System.Collections.Concurrent;
 using System.Reflection;
 
-namespace ObjectRT.Runtime;
+namespace ObjectRT.Runtime
+{
+
 
 /// <summary>
 /// An <see cref="INativeResolver"/> that uses CLR reflection to resolve
@@ -52,6 +54,12 @@ public sealed class ClrNativeResolver : INativeResolver
         RegisterType(name ?? typeof(T).Name, typeof(T));
     }
 
+    /// <summary>
+    /// Returns all registered type names and their CLR types.
+    /// Used by <c>--list-imports</c> to enumerate available types.
+    /// </summary>
+    public IReadOnlyDictionary<string, Type> GetRegisteredTypes() => _typeMap;
+
     /// <summary>Register all public static methods from a CLR type directly.</summary>
     public void RegisterTypeWithMethods(string name, Type type)
     {
@@ -73,21 +81,140 @@ public sealed class ClrNativeResolver : INativeResolver
         if (_cache.TryGetValue(cacheKey, out var cached))
             return cached as Delegate;
 
-        // Parse "TypeName.MethodName"
-        var dot = qualifiedName.LastIndexOf('.');
-        if (dot < 0)
+        // Parse "TypeName.MethodName". Constructors are emitted as "Type..ctor"
+        // (a double dot before ".ctor"); splitting on the LAST dot would hand
+        // the resolver a type name with a trailing dot ("System.Text.StringBuilder.")
+        // and a methodName of "ctor". Detect that exact suffix so the type
+        // parses cleanly and the method name stays ".ctor".
+        string typeName;
+        string methodName;
+        if (qualifiedName.EndsWith("..ctor", StringComparison.Ordinal))
         {
-            _cache.TryAdd(cacheKey, s_notFoundSentinel);
-            return null;
+            typeName = qualifiedName[..^".ctor".Length].TrimEnd('.');
+            methodName = ".ctor";
         }
-
-        var typeName = qualifiedName[..dot];
-        var methodName = qualifiedName[(dot + 1)..];
+        else
+        {
+            var dot = qualifiedName.LastIndexOf('.');
+            if (dot < 0)
+            {
+                _cache.TryAdd(cacheKey, s_notFoundSentinel);
+                return null;
+            }
+            typeName = qualifiedName[..dot];
+            methodName = qualifiedName[(dot + 1)..];
+        }
 
         if (!_typeMap.TryGetValue(typeName, out var clrType))
         {
             _cache.TryAdd(cacheKey, s_notFoundSentinel);
             return null;
+        }
+
+        // ── Constructor dispatch ─────────────────────────────────
+        // A ClrImport facade constructor ("Type..ctor") maps to the CLR type's
+        // public constructor; the result is a new instance (an external handle).
+        if (methodName == ".ctor")
+        {
+            var ctors = clrType.GetConstructors(BindingFlags.Public | BindingFlags.Instance)
+                .Where(c => !c.IsStatic)
+                .ToArray();
+            var ctor = MatchConstructor(ctors, args);
+            if (ctor == null)
+            {
+                _cache.TryAdd(cacheKey, s_notFoundSentinel);
+                return null;
+            }
+            Delegate ctorDel = new Func<object?[], object?>(a =>
+            {
+                try { return ctor.Invoke(CoerceArgs(ctor.GetParameters(), a)); }
+                catch (TargetInvocationException tie) { throw tie.InnerException ?? tie; }
+            });
+            _cache.TryAdd(cacheKey, ctorDel);
+            return ctorDel;
+        }
+
+        // ── Instance dispatch ────────────────────────────────────
+        // When the first argument is a CLR receiver object of the target type
+        // (and no static method matches), treat the call as an *instance*
+        // method: invoke it ON the receiver, with args[1..] as the parameters.
+        // The receiver is an external object handle unmarshalled by the VM.
+        if (args.Length >= 1 && args[0] != null
+            && (clrType.IsInstanceOfType(args[0]) || IsAssignableFrom(clrType, args[0]!.GetType())))
+        {
+            var instMethods = clrType.GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                .Where(m => !m.IsStatic && m.Name == methodName)
+                .ToArray();
+            // Parameters for an instance call exclude the receiver (args[1..]).
+            var instParams = args.Skip(1).ToArray();
+            MethodInfo? instBest = MatchMethod(instMethods, instParams);
+            if (instBest != null)
+            {
+                var target = instBest;
+                // The delegate must read the CURRENT invocation args (a), not
+                // capture the first-call values — the VM re-invokes the cached
+                // delegate with fresh args on every call site. `target` is fixed
+                // by the cache key (name + arg types), but receiver/params change.
+                Delegate instDel = new Func<object?[], object?>(a =>
+                {
+                    try
+                    {
+                        var r = a.Length >= 1 ? a[0] : null;
+                        var realParams = a.Skip(1).ToArray();
+                        var co = CoerceArgs(target.GetParameters(), realParams);
+                        var all = new object?[co.Length + 1];
+                        all[0] = r;
+                        for (int i = 0; i < co.Length; i++) all[i + 1] = co[i];
+                        return target.Invoke(r, all[1..]);
+                    }
+                    catch (TargetInvocationException tie) { throw tie.InnerException ?? tie; }
+                });
+                _cache.TryAdd(cacheKey, instDel);
+                return instDel;
+            }
+        }
+
+        // ── Field access ─────────────────────────────────────────
+        // "Type.Field" maps to a public instance field or property. The VM
+        // calls it with the receiver as args[0] (read: args.Length == 1;
+        // write: args.Length == 2 with the new value in args[1]).
+        var prop = clrType.GetProperty(methodName, BindingFlags.Public | BindingFlags.Instance);
+        var field = clrType.GetField(methodName, BindingFlags.Public | BindingFlags.Instance);
+        if (prop != null || field != null)
+        {
+            var pTarget = prop;
+            var fTarget = field;
+            // Read when a single receiver arg is supplied ~ the receiver is
+            // args[0]; write when a value is supplied alongside it (args[1]).
+            Delegate fDel;
+            if (pTarget != null)
+            {
+                fDel = new Func<object?[], object?>(a =>
+                {
+                    var r = a[0];
+                    if (a.Length >= 2)
+                    {
+                        pTarget.SetValue(r, CoerceTo(pTarget.PropertyType, a[1]));
+                        return null;
+                    }
+                    return pTarget.GetValue(r);
+                });
+            }
+            else
+            {
+                fDel = new Func<object?[], object?>(a =>
+                {
+                    var r = a[0];
+                    if (a.Length >= 2)
+                    {
+                        fTarget.SetValue(r, CoerceTo(fTarget.FieldType, a[1]));
+                        return null;
+                    }
+                    return fTarget.GetValue(r);
+                });
+            }
+            _cache.TryAdd(cacheKey, fDel);
+            return fDel;
         }
 
         // Find matching public static method by name, then rank overloads by
@@ -99,9 +226,31 @@ public sealed class ClrNativeResolver : INativeResolver
             .Where(m => m.Name == methodName)
             .ToArray();
 
+        MethodInfo? best = MatchMethod(methods, args);
+
+        // Fallback: arity-only match (previous behavior) — keeps object
+        // handles and untyped args working when no exact signature lines up.
+        best ??= methods.FirstOrDefault(m => m.GetParameters().Length == args.Length);
+        best ??= methods.Length > 0 ? methods[0] : null;
+
+        if (best == null)
+        {
+            _cache.TryAdd(cacheKey, s_notFoundSentinel);
+            return null;
+        }
+
+        // Build a delegate
+        var result = CreateInvokeDelegate(best, qualifiedName);
+        if (result != null)
+            _cache.TryAdd(cacheKey, result);
+        return result;
+    }
+
+    /// <summary>Ranks and selects the best matching method for the supplied arguments.</summary>
+    private static MethodInfo? MatchMethod(IEnumerable<MethodInfo> methods, object?[] args)
+    {
         MethodInfo? best = null;
         int bestScore = -1;
-
         foreach (var m in methods)
         {
             var ps = m.GetParameters();
@@ -139,23 +288,73 @@ public sealed class ClrNativeResolver : INativeResolver
                 best = m;
             }
         }
+        return best;
+    }
 
-        // Fallback: arity-only match (previous behavior) — keeps object
-        // handles and untyped args working when no exact signature lines up.
-        best ??= methods.FirstOrDefault(m => m.GetParameters().Length == args.Length);
-        best ??= methods.Length > 0 ? methods[0] : null;
-
-        if (best == null)
+    private static ConstructorInfo? MatchConstructor(IEnumerable<ConstructorInfo> ctors, object?[] args)
+    {
+        ConstructorInfo? best = null;
+        int bestScore = -1;
+        foreach (var c in ctors)
         {
-            _cache.TryAdd(cacheKey, s_notFoundSentinel);
-            return null;
+            var ps = c.GetParameters();
+            if (ps.Length != args.Length) continue;
+            int score = 0;
+            bool compatible = true;
+            for (int i = 0; i < ps.Length && compatible; i++)
+            {
+                var target = ps[i].ParameterType;
+                var v = args[i];
+                if (v == null)
+                {
+                    if (!target.IsValueType || Nullable.GetUnderlyingType(target) != null) score += 1;
+                    else compatible = false;
+                    continue;
+                }
+                var vt = v.GetType();
+                if (target == vt) score += 3;
+                else if (target == typeof(double) && (v is int or float or long)) score += 2;
+                else if (target == typeof(float) && v is int) score += 2;
+                else if (target == typeof(long) && v is int) score += 2;
+                else if (target.IsAssignableFrom(vt)) score += 1;
+                else compatible = false;
+            }
+            if (compatible && score > bestScore) { bestScore = score; best = c; }
         }
+        return best;
+    }
 
-        // Build a delegate
-        var result = CreateInvokeDelegate(best, qualifiedName);
-        if (result != null)
-            _cache.TryAdd(cacheKey, result);
-        return result;
+    private static bool IsAssignableFrom(Type target, Type actual)
+    {
+        try { return target.IsAssignableFrom(actual); }
+        catch { return false; }
+    }
+
+    /// <summary>Coerces VM-marshaled argument values to a method's declared parameter types.</summary>
+    private static object?[] CoerceArgs(ParameterInfo[] parameters, object?[] args)
+    {
+        for (int i = 0; i < parameters.Length && i < args.Length; i++)
+            args[i] = CoerceTo(parameters[i].ParameterType, args[i]);
+        return args;
+    }
+
+    /// <summary>Coerces a single value to a target CLR type (numeric widening, bool, string, arrays).</summary>
+    private static object? CoerceTo(Type target, object? v)
+    {
+        if (v == null) return null;
+        if (target.IsInstanceOfType(v)) return v;
+        if (target == typeof(bool) && v is int i0) return i0 != 0;
+        if (target == typeof(int) && v is bool b0) return b0 ? 1 : 0;
+        if (target == typeof(double) && v is int i1) return (double)i1;
+        if (target == typeof(double) && v is long l1) return (double)l1;
+        if (target == typeof(double) && v is float f1) return (double)f1;
+        if (target == typeof(float) && v is int i2) return (float)i2;
+        if (target == typeof(float) && v is long l2) return (float)l2;
+        if (target == typeof(float) && v is double d2) return (float)d2;
+        if (target == typeof(long) && v is int i3) return (long)i3;
+        if (target == typeof(string)) return v.ToString();
+        if (target.IsArray && v is System.Array srcArr) return CoerceArray(srcArr, target.GetElementType()!);
+        return v;
     }
 
     private static Delegate? CreateInvokeDelegate(MethodInfo method, string qualifiedName)
@@ -251,4 +450,5 @@ public sealed class ClrNativeResolver : INativeResolver
         if (target == typeof(string)) return v.ToString();
         return v;
     }
+}
 }

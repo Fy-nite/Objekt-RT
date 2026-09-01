@@ -96,6 +96,12 @@ public sealed class Runtime : IHostedRuntime
     }
 
     /// <summary>
+    /// Directory of the .ct source file. Used to resolve project-local
+    /// assemblies referenced by <c>&lt;ClrImport(..., Path: "Foo.dll")&gt;</c>.
+    /// </summary>
+    public string? SourceDir { get; set; }
+
+    /// <summary>
     /// When non-null, every executor counts how many times each module
     /// function is entered. Set this before running to enable call-graph
     /// collection for the <c>--emit-callgraph</c> CLI flag.
@@ -678,8 +684,10 @@ public sealed class Runtime : IHostedRuntime
         foreach (var type in module.Types)
         {
             bool isDllImport = type.Attributes.Any(a =>
-                module.Resolve(a.NameIndex) == "DllImport");
-            if (isDllImport)
+                string.Equals(module.Resolve(a.NameIndex), "DllImport", StringComparison.OrdinalIgnoreCase));
+            bool isClrImport = type.Attributes.Any(a =>
+                string.Equals(module.Resolve(a.NameIndex), "ClrImport", StringComparison.OrdinalIgnoreCase));
+            if (isDllImport || isClrImport)
             {
                 foreach (var m in type.Methods)
                 {
@@ -688,6 +696,9 @@ public sealed class Runtime : IHostedRuntime
                 }
             }
         }
+
+        // Scan for @ClrImport with @Path= named args (project-local assemblies)
+        ScanAssemblyImports(module);
 
         var result = VmCompiler.Compile(module);
         if (result.IsError)
@@ -717,6 +728,76 @@ public sealed class Runtime : IHostedRuntime
     {
         if (_compiled != null)
             _executor = CreateExecutor(_compiled);
+    }
+
+    // ── Assembly imports ──────────────────────────────────────────
+
+    /// <summary>
+    /// Loads a project-local .NET assembly and registers its public types
+    /// with the <see cref="ClrNativeResolver"/> so they are callable via
+    /// <c>&lt;ClrImport&gt;</c>.
+    /// </summary>
+    /// <param name="typeName">CLR type name to register (e.g. "MyLib.Foo").</param>
+    /// <param name="dllPath">Path to the .dll, resolved relative to <see cref="SourceDir"/>.</param>
+    public void LoadAssemblyImport(string typeName, string dllPath)
+    {
+        var fullPath = Path.Combine(SourceDir ?? ".", dllPath);
+        if (!File.Exists(fullPath))
+        {
+            Console.Error.WriteLine($"[AssemblyImport] Assembly not found: {fullPath}");
+            return;
+        }
+        try
+        {
+            var assembly = System.Reflection.Assembly.LoadFrom(fullPath);
+            var clrType = assembly.GetType(typeName);
+            if (clrType == null)
+            {
+                Console.Error.WriteLine($"[AssemblyImport] Type '{typeName}' not found in '{dllPath}'");
+                return;
+            }
+            ClrResolver.RegisterType(typeName, clrType);
+            // Also register the short name for unqualified use
+            var shortName = clrType.Name;
+            if (!ClrResolver.GetRegisteredTypes().ContainsKey(shortName))
+                ClrResolver.RegisterType(shortName, clrType);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[AssemblyImport] Failed to load '{dllPath}': {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Scans an ORBT module for <c>@ClrImport</c> attributes with
+    /// <c>@Path=</c> named args and loads the referenced assemblies.
+    /// </summary>
+    private void ScanAssemblyImports(ORBTModule module)
+    {
+        foreach (var type in module.Types)
+        {
+            foreach (var attr in type.Attributes)
+            {
+                var attrName = module.Resolve(attr.NameIndex);
+                if (!string.Equals(attrName, "ClrImport", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                // Look for @Path= named arg in the encoded arguments
+                foreach (var argIdx in attr.ArgIndices)
+                {
+                    var arg = module.Resolve(argIdx);
+                    if (arg.StartsWith("@Path=", StringComparison.Ordinal))
+                    {
+                        var dllPath = arg["@Path=".Length..];
+                        // Strip quotes if present
+                        if (dllPath.Length >= 2 && dllPath[0] == '"' && dllPath[^1] == '"')
+                            dllPath = dllPath[1..^1];
+                        var typeName = module.Resolve(type.NameIndex);
+                        LoadAssemblyImport(typeName, dllPath);
+                    }
+                }
+            }
+        }
     }
 
     // ── Reflection ─────────────────────────────────────────────────

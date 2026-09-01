@@ -409,7 +409,11 @@ public class ModuleCompiler
         return parts.Where(p => p.Length > 0).ToArray();
     }
 
-    /// <summary>The declaring type of a qualified reference: "Box::field" or "Box.method" / "Box..ctor".</summary>
+    /// <summary>The declaring type of a qualified reference: "Box::field" or
+    /// "Box.method" / "Box..ctor". The member sits after the LAST separator, so
+    /// namespaced or materialized generic declaring types (""thing.List&lt;uint8&gt;.Get"",
+    /// ""ns.Box&lt;int32&gt;..ctor"") are recovered whole rather than truncated
+    /// at the first dot.</summary>
     private static string DeclaringTypeOf(string refStr, bool fieldRef)
     {
         if (fieldRef)
@@ -417,8 +421,13 @@ public class ModuleCompiler
             int sc = refStr.IndexOf("::", StringComparison.Ordinal);
             if (sc > 0) return refStr[..sc];
         }
-        int idx = refStr.IndexOf('.');
-        return idx > 0 ? refStr[..idx] : refStr;
+        int idx = refStr.LastIndexOf('.');
+        if (idx <= 0) return refStr;
+        // "ns.Type..ctor" — the ".ctor" member follows "..", so the declaring
+        // type ends right before the two dots.
+        if (refStr[idx - 1] == '.')
+            return refStr[..(idx - 1)];
+        return refStr[..idx];
     }
 
     /// <summary>Decodes a method's raw bytecode into Instructions, caching on the record.</summary>
@@ -613,6 +622,34 @@ public class ModuleCompiler
     private static string FieldFullName(ORBTModule src, TypeRecord type, FieldRecord field)
         => $"{src.Resolve(type.NameIndex)}.{src.Resolve(field.NameIndex)}";
 
+    /// <summary>
+    /// Resolves a field reference string (as stored in bytecode) to its index
+    /// in the compiled module's field table. The wire stores field refs using
+    /// the declaring type as the source spelled it, which is sometimes short or
+    /// namespace-relative ("option.Value.v", "std.Generics.Result.__tag") while
+    /// the field table is keyed by the fully-qualified name. Fall back to a
+    /// suffix match so those still resolve.
+    /// </summary>
+    private bool TryResolveFieldIndex(string fieldRef, out uint index)
+    {
+        if (_fieldMap.TryGetValue(fieldRef, out index)) return true;
+        // Fall back to a fully-qualified key that ends with this (possibly
+        // short/relative) ref — e.g. "ObjektRT.std.Generics.option.Value.v"
+        // for "option.Value.v".
+        var withDotField = "." + fieldRef;
+        var withColonField = "::" + fieldRef;
+        foreach (var kv in _fieldMap)
+        {
+            if (kv.Key.EndsWith(withDotField, StringComparison.Ordinal)
+                || kv.Key.EndsWith(withColonField, StringComparison.Ordinal))
+            {
+                index = kv.Value;
+                return true;
+            }
+        }
+        return false;
+    }
+
     // ── Compile a single method ────────────────────────────────────
 
     private Result<CompiledFunction> CompileMethod(ORBTModule src, TypeRecord type, MethodRecord method, string fullName)
@@ -733,7 +770,7 @@ public class ModuleCompiler
                 case Opcode.Ceq: case Opcode.Cne:
                 case Opcode.Cgt: case Opcode.Cge:
                 case Opcode.Clt: case Opcode.Cle:
-                case Opcode.And: case Opcode.Xor: case Opcode.Or:
+                case Opcode.And: case Opcode.Xor: case Opcode.Or: case Opcode.Shl:
                     // pop 2, push 1 → net -1
                     if (state.CurrentDepth > 0) state.CurrentDepth--;
                     break;
@@ -768,7 +805,7 @@ public class ModuleCompiler
                 case Opcode.Neg: case Opcode.Ceq: case Opcode.Cne:
                 case Opcode.Cgt: case Opcode.Cge: case Opcode.Clt:
                 case Opcode.Cle: case Opcode.And: case Opcode.Xor:
-                case Opcode.Or: case Opcode.Not: case Opcode.Dup:
+                case Opcode.Or: case Opcode.Shl: case Opcode.Not: case Opcode.Dup:
                 case Opcode.Pop: case Opcode.Ldnull: case Opcode.Ret:
                 case Opcode.Break: case Opcode.Continue:
                 case Opcode.Throw: case Opcode.Ldelem: case Opcode.Stelem:
@@ -825,7 +862,7 @@ public class ModuleCompiler
                 case Opcode.Ldsfld: case Opcode.Stsfld:
                 {
                     string fieldRef = src.Resolve(((OperandFieldRef)instr.Operand).StringIndex);
-                    if (_fieldMap.TryGetValue(fieldRef, out var fi))
+                    if (TryResolveFieldIndex(fieldRef, out var fi))
                         EmitU16(state, (ushort)fi);
                     else
                     {
@@ -998,7 +1035,7 @@ public class ModuleCompiler
                 or Opcode.Div or Opcode.Rem or Opcode.Neg
                 or Opcode.Ceq or Opcode.Cne or Opcode.Cgt or Opcode.Cge
                 or Opcode.Clt or Opcode.Cle
-                or Opcode.And or Opcode.Xor or Opcode.Or
+                or Opcode.And or Opcode.Xor or Opcode.Or or Opcode.Shl
                 or Opcode.Not or Opcode.Dup or Opcode.Pop
                 or Opcode.Ldnull or Opcode.Ret or Opcode.Break
                 or Opcode.Continue or Opcode.Throw
@@ -1107,7 +1144,7 @@ public class ModuleCompiler
             case Opcode.Nop: case Opcode.Add: case Opcode.Sub: case Opcode.Mul:
             case Opcode.Div: case Opcode.Rem: case Opcode.Neg:
             case Opcode.Ceq: case Opcode.Cne: case Opcode.Cgt: case Opcode.Cge:
-            case Opcode.Clt: case Opcode.Cle: case Opcode.And: case Opcode.Xor: case Opcode.Or:
+            case Opcode.Clt: case Opcode.Cle: case Opcode.And: case Opcode.Xor: case Opcode.Or: case Opcode.Shl:
             case Opcode.Not: case Opcode.Dup: case Opcode.Pop: case Opcode.Ldnull:
             case Opcode.Ret: case Opcode.Break: case Opcode.Continue: case Opcode.Throw:
             case Opcode.Ldelem: case Opcode.Stelem:

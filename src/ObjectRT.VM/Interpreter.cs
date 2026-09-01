@@ -186,10 +186,40 @@ public sealed class Interpreter : ExecutorBase
                     case Opcode.LdcR4: { float v = ReadF32(code, ref pc); Push(Value.FromR4(v)); break; }
                     case Opcode.LdcR8: { double v = ReadF64(code, ref pc); Push(Value.FromR8(v)); break; }
                     case Opcode.Ldstr: { ushort si = ReadU16(code, ref pc); Push(Value.FromStr(si)); break; }
-                    case Opcode.Ldarg: { ushort idx = ReadU16(code, ref pc); Push(frame.Locals[idx]); break; }
-                    case Opcode.Starg: { ushort idx = ReadU16(code, ref pc); frame.Locals[idx] = Pop(); break; }
-                    case Opcode.Ldloc: { ushort idx = ReadU16(code, ref pc); Push(frame.Locals[frame.Func.NumParams + idx]); break; }
-                    case Opcode.Stloc: { ushort idx = ReadU16(code, ref pc); frame.Locals[frame.Func.NumParams + idx] = Pop(); break; }
+                    case Opcode.Ldarg:
+                    {
+                        ushort idx = ReadU16(code, ref pc);
+                        if (idx >= (uint)frame.Locals.Length)
+                            return Err(VmErrorKind.RuntimeError, $"{_currentFuncName} pc={_currentPc}: arg {idx} out of range");
+                        Push(frame.Locals[idx]);
+                        break;
+                    }
+                    case Opcode.Starg:
+                    {
+                        ushort idx = ReadU16(code, ref pc);
+                        if (idx >= (uint)frame.Locals.Length)
+                            return Err(VmErrorKind.RuntimeError, $"{_currentFuncName} pc={_currentPc}: arg {idx} out of range");
+                        frame.Locals[idx] = Pop();
+                        break;
+                    }
+                    case Opcode.Ldloc:
+                    {
+                        ushort idx = ReadU16(code, ref pc);
+                        int slot = (int)frame.Func.NumParams + idx;
+                        if (slot < 0 || slot >= frame.Locals.Length)
+                            return Err(VmErrorKind.RuntimeError, $"{_currentFuncName} pc={_currentPc}: local {idx} out of range (slot {slot})");
+                        Push(frame.Locals[slot]);
+                        break;
+                    }
+                    case Opcode.Stloc:
+                    {
+                        ushort idx = ReadU16(code, ref pc);
+                        int slot = (int)frame.Func.NumParams + idx;
+                        if (slot < 0 || slot >= frame.Locals.Length)
+                            return Err(VmErrorKind.RuntimeError, $"{_currentFuncName} pc={_currentPc}: local {idx} out of range (slot {slot})");
+                        frame.Locals[slot] = Pop();
+                        break;
+                    }
 
                     case Opcode.Add: { var b = Pop(); var a = Pop(); Push(I4Arith(a, b, I4Add, I8Add, R4Add, R8Add)); break; }
                     case Opcode.Sub: { var b = Pop(); var a = Pop(); Push(I4Arith(a, b, I4Sub, I8Sub, R4Sub, R8Sub)); break; }
@@ -215,6 +245,7 @@ public sealed class Interpreter : ExecutorBase
                     case Opcode.And: { int b = Pop().I4, a = Pop().I4; Push(Value.FromI4(a & b)); break; }
                     case Opcode.Or:  { int b = Pop().I4, a = Pop().I4; Push(Value.FromI4(a | b)); break; }
                     case Opcode.Xor: { int b = Pop().I4, a = Pop().I4; Push(Value.FromI4(a ^ b)); break; }
+                    case Opcode.Shl: { int b = Pop().I4, a = Pop().I4; Push(Value.FromI4(a << b)); break; }
                     case Opcode.Not: { int v = Pop().I4; Push(Value.FromI4(v == 0 ? 1 : 0)); break; }
 
                     case Opcode.Ceq: { var b = Pop(); var a = Pop(); Push(Value.FromI4(CompareEquals(a, b) ? 1 : 0)); break; }
@@ -374,10 +405,17 @@ public sealed class Interpreter : ExecutorBase
                             catch (VmRuntimeException vre) { return vre.Error; }
                             catch (Exception ex) { return Err(VmErrorKind.RuntimeError, $"call '{name}': {ex.Message}"); }
 
-                            // Sync backing array → List stack: remove args, push results
+                            // Sync backing array → List stack: remove args, push results.
+                            // Calls follow one uniform convention: a feature always leaves
+                            // exactly one value on the stack — Nil for a void return (the same
+                            // convention `Ret` and the slow native path use). Void direct
+                            // handlers return sp (0 results), so synthesize the Nil here.
                             _stack.RemoveRange(spBase, argc);
-                            for (int i = 0; i < newSp; i++)
-                                _stack.Add(_directStack[i]);
+                            if (newSp == 0)
+                                _stack.Add(Value.Nil());
+                            else
+                                for (int i = 0; i < newSp; i++)
+                                    _stack.Add(_directStack[i]);
                             break;
                         }
 
@@ -758,8 +796,11 @@ public sealed class Interpreter : ExecutorBase
     private System.Array? GetExternalArray(Value v)
     {
         if (v.Tag != ValueTag.Obj || !ExecutorState.IsExternal(v.AsObj()))
+        {
             return null;
-        return State.GetExternal(v.AsObj()) as System.Array;
+        }
+        var result = State.GetExternal(v.AsObj()) as System.Array;
+        return result;
     }
 
     /// <summary>

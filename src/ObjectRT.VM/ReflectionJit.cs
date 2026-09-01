@@ -247,6 +247,7 @@ public sealed class ReflectionJit : ExecutorBase
             case Opcode.And: sb.Append("    { int b=s[--sp].I4, a=s[--sp].I4; s[sp++]=Value.FromI4(a&b); }"); break;
             case Opcode.Or:  sb.Append("    { int b=s[--sp].I4, a=s[--sp].I4; s[sp++]=Value.FromI4(a|b); }"); break;
             case Opcode.Xor: sb.Append("    { int b=s[--sp].I4, a=s[--sp].I4; s[sp++]=Value.FromI4(a^b); }"); break;
+            case Opcode.Shl: sb.Append("    { int b=s[--sp].I4, a=s[--sp].I4; s[sp++]=Value.FromI4(a<<b); }"); break;
             case Opcode.Not: sb.Append("    { var v=s[--sp]; s[sp++]=Value.FromI4(~v.I4); }"); break;
 
             case Opcode.Ceq: sb.Append("    { var b=s[--sp]; var a=s[--sp]; s[sp++]=Value.FromI4(Interpreter.NumericCompare(a,b)==0?1:0); }"); break;
@@ -452,7 +453,7 @@ public sealed class ReflectionJit : ExecutorBase
         {
             Opcode.Nop or Opcode.Add or Opcode.Sub or Opcode.Mul or Opcode.Div or Opcode.Rem or Opcode.Neg
                 or Opcode.Ceq or Opcode.Cne or Opcode.Cgt or Opcode.Cge or Opcode.Clt or Opcode.Cle
-                or Opcode.And or Opcode.Xor or Opcode.Or or Opcode.Not or Opcode.Dup or Opcode.Pop
+                or Opcode.And or Opcode.Xor or Opcode.Or or Opcode.Shl or Opcode.Not or Opcode.Dup or Opcode.Pop
                 or Opcode.Ldnull or Opcode.Ret or Opcode.Break or Opcode.Continue or Opcode.Throw
                 or Opcode.Ldelem or Opcode.Stelem => 0,
             Opcode.LdcI4 or Opcode.Ldc or Opcode.LdcR4 => 4,

@@ -46,6 +46,18 @@ public sealed class ExecutorState
     {
         StaticFields = new Value[mod.Fields.Count];
         System.Array.Fill(StaticFields, Value.Nil());
+
+        // The compiled module carries the ORBT string pool (type/method names,
+        // and the string literals that `ldstr` indexes into). Those literal
+        // handles are offsets into THIS pool, so seed the runtime string table
+        // from it — otherwise a literal handle resolves against an empty list
+        // and reads back null.
+        foreach (var s in mod.Strings)
+        {
+            if (s == null) { _strings.Add(null); continue; }
+            _stringMap.TryAdd(s, (uint)_strings.Count);
+            _strings.Add(s);
+        }
     }
 
     public uint InternString(string s)
