@@ -3,6 +3,7 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
 using ObjectRT.Abstractions;
+using ObjectRT.Abstractions.GC;
 using ObjektRT.Core.Model;
 using ObjektRT.Core.Parsing;
 using ObjectRT.VM;
@@ -570,11 +571,11 @@ public sealed class Runtime : IHostedRuntime
         var state = ((ExecutorBase)_executor).State;
         thread.Launch(() =>
         {
+            var exec = new Interpreter(mod, state);
+            exec.NativeCallHandler = ResolveNativeCall;
+            exec.MaxSteps = MaxSteps;
             try
             {
-                var exec = new Interpreter(mod, state);
-                exec.NativeCallHandler = ResolveNativeCall;
-                exec.MaxSteps = MaxSteps;
                 var result = exec.RunDelegate(thread.DelegateHandle, Array.Empty<Value>());
                 if (result.IsError)
                     Console.Error.WriteLine($"; Thread error: {result.Error}");
@@ -583,6 +584,7 @@ public sealed class Runtime : IHostedRuntime
             {
                 Console.Error.WriteLine($"; Thread exception: {ex.Message}");
             }
+            finally { exec.Unregister(); }
         });
     }
 
@@ -604,11 +606,11 @@ public sealed class Runtime : IHostedRuntime
         var state = ((ExecutorBase)_executor).State;
         var t = new Thread(() =>
         {
+            var exec = new Interpreter(mod, state);
+            exec.NativeCallHandler = ResolveNativeCall;
+            exec.MaxSteps = MaxSteps;
             try
             {
-                var exec = new Interpreter(mod, state);
-                exec.NativeCallHandler = ResolveNativeCall;
-                exec.MaxSteps = MaxSteps;
                 var result = exec.RunDelegate(h, Array.Empty<Value>());
                 if (result.IsError)
                     Console.Error.WriteLine($"; Thread error: {result.Error}");
@@ -617,6 +619,7 @@ public sealed class Runtime : IHostedRuntime
             {
                 Console.Error.WriteLine($"; Thread exception: {ex.Message}");
             }
+            finally { exec.Unregister(); }
         });
         t.IsBackground = true;
         t.Start();
@@ -647,10 +650,14 @@ public sealed class Runtime : IHostedRuntime
         for (int i = 0; i < args.Length; i++)
             vmArgs[i] = exec.MarshalValue(args[i]);
 
-        var result = exec.RunDelegate(h, vmArgs);
-        if (result.IsError)
-            throw new InvalidOperationException(result.Error.ToString());
-        return exec.ValueToObject(result.Value);
+        try
+        {
+            var result = exec.RunDelegate(h, vmArgs);
+            if (result.IsError)
+                throw new InvalidOperationException(result.Error.ToString());
+            return exec.ValueToObject(result.Value);
+        }
+        finally { exec.Unregister(); }
     }
 
     // ── Module loading ─────────────────────────────────────────────
@@ -704,6 +711,7 @@ public sealed class Runtime : IHostedRuntime
         if (result.IsError)
             throw new InvalidOperationException($"Compilation failed: {result.Error}");
 
+        if (_executor is Interpreter prevIp) prevIp.Unregister();
         _compiled = result.Value;
         _executor = CreateExecutor(_compiled);
 
@@ -727,7 +735,19 @@ public sealed class Runtime : IHostedRuntime
     public void ResetExecutor()
     {
         if (_compiled != null)
+        {
+            if (_executor is Interpreter oldIp) oldIp.Unregister();
             _executor = CreateExecutor(_compiled);
+        }
+    }
+
+    // ── GC ────────────────────────────────────────────────────────────
+
+    public GCStats GCStats => _executor is ExecutorBase eb ? eb.State.GCStats : new GCStats();
+    public bool CollectGC(GCReason reason = GCReason.Explicit)
+    {
+        if (_executor is ExecutorBase eb) return eb.State.CollectGC(reason);
+        return false;
     }
 
     // ── Assembly imports ──────────────────────────────────────────
@@ -850,9 +870,9 @@ public sealed class Runtime : IHostedRuntime
         }
         if (typeIdx < 0) return null;
         var type = _compiled.GetType((uint)typeIdx);
-        uint handle = (uint)ex.Heap.Count;
-        ex.Heap.Add(new byte[type.InstanceSize]);
-        return handle;
+        var alloc = ex.AllocObject((uint)typeIdx);
+        if (alloc.IsError) return null;
+        return alloc.Value;
     }
 
     /// <summary>
@@ -890,10 +910,11 @@ public sealed class Runtime : IHostedRuntime
         if (!_compiled.FieldMap.TryGetValue(qualifiedName, out var idx)) return null;
         if (IsStaticField(qualifiedName))
             return ex.ValueToObject(ex.StaticFields[(int)idx]);
-        if (instance is not uint h || h >= ex.Heap.Count) return null;
+        if (instance is not uint h) return null;
+        if (!ex.State.TryGetHeapBuffer(h, out var buf) || buf == null) return null;
         var fld = _compiled.Fields[(int)idx];
-        if (fld.Offset + VmConstants.FieldSlotSize > ex.Heap[(int)h].Length) return null;
-        var val = MemoryMarshal.Read<Value>(ex.Heap[(int)h].AsSpan((int)fld.Offset, (int)VmConstants.FieldSlotSize));
+        if (fld.Offset + VmConstants.FieldSlotSize > (uint)buf.Length) return null;
+        var val = MemoryMarshal.Read<Value>(buf.AsSpan((int)fld.Offset, (int)VmConstants.FieldSlotSize));
         return ex.ValueToObject(val);
     }
 
@@ -913,10 +934,11 @@ public sealed class Runtime : IHostedRuntime
             ex.StaticFields[(int)idx] = marshaled;
             return;
         }
-        if (instance is not uint h || h >= ex.Heap.Count) return;
+        if (instance is not uint h) return;
+        if (!ex.State.TryGetHeapBuffer(h, out var wbuf) || wbuf == null) return;
         var fld = _compiled.Fields[(int)idx];
-        if (fld.Offset + VmConstants.FieldSlotSize > ex.Heap[(int)h].Length) return;
-        MemoryMarshal.Write(ex.Heap[(int)h].AsSpan((int)fld.Offset, (int)VmConstants.FieldSlotSize), in marshaled);
+        if (fld.Offset + VmConstants.FieldSlotSize > (uint)wbuf.Length) return;
+        MemoryMarshal.Write(wbuf.AsSpan((int)fld.Offset, (int)VmConstants.FieldSlotSize), in marshaled);
     }
 
     // ── Native method registration ─────────────────────────────────
@@ -1113,11 +1135,13 @@ public sealed class Runtime : IHostedRuntime
         // Reset() would wipe the OUTER frames. Use a fresh interpreter sharing
         // the same heap/statics instead.
         IExecutor vm;
+        bool isReentrant = false;
         if (_executor is Interpreter active && active.IsExecuting)
         {
             vm = new Interpreter(_compiled, active.State);
             AttachHostHandlers(vm);
             if (vm is Interpreter ip) ip.MaxSteps = MaxSteps;
+            isReentrant = true;
         }
         else
         {
@@ -1129,7 +1153,15 @@ public sealed class Runtime : IHostedRuntime
         for (int i = 0; i < args.Length; i++)
             vmArgs[i] = vm.MarshalValue(args[i]);
 
-        var result = vm.RunFunction(funcIdx, vmArgs);
+        Result<Value> result;
+        try
+        {
+            result = vm.RunFunction(funcIdx, vmArgs);
+        }
+        finally
+        {
+            if (isReentrant && vm is Interpreter reentrant) reentrant.Unregister();
+        }
 
         if (result.IsError)
             throw new InvalidOperationException(result.Error.ToString());

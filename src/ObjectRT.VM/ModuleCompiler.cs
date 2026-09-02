@@ -267,6 +267,18 @@ public class ModuleCompiler
             int typeIdx = _typeMap.Count;
             _typeMap[tname] = (uint)typeIdx;
 
+            // A @Generic definition is a template: its method bodies reference
+            // the raw type params (e.g. `isinst T`), which cannot be compiled
+            // standalone. Only the materialized instantiations (which carry
+            // concrete type args instead) are callable. Register the TYPE so
+            // indices stay aligned with src.Types, but declare no fields or
+            // methods for the template itself.
+            if (TryGetGenericParams(src, type, out _))
+            {
+                _typeMethodStart.Add((uint)_resolvedFuncs.Count);
+                continue;
+            }
+
             _typeMethodStart.Add((uint)_resolvedFuncs.Count);
 
             foreach (var field in type.Fields)
@@ -558,6 +570,12 @@ public class ModuleCompiler
                     OperandTypeRef ot => new OperandTypeRef(src.StringPool.Add(Substitute(src.Resolve(ot.StringIndex)))),
                     OperandString os when inst.Opcode is Opcode.Newobj or Opcode.Newarr
                         => new OperandString(src.StringPool.Add(Substitute(src.Resolve(os.StringIndex)))),
+                    // ldstr: the compiler emits the target type name as a literal
+                    // string for primitive `as T` / `is T` (TypeHelper.CastOrNull).
+                    // Substitute only when the whole literal is exactly a type
+                    // parameter name, so genuine string data is left untouched.
+                    OperandString os when inst.Opcode == Opcode.Ldstr =>
+                        new OperandString(src.StringPool.Add(SubstituteTypeNameLiteral(src.Resolve(os.StringIndex), paramMap))),
                     _ => inst.Operand,
                 };
                 cm.Instructions.Add(inst with { Operand = newOperand });
@@ -581,6 +599,19 @@ public class ModuleCompiler
         foreach (var (param, arg) in paramMap)
             s = ReplaceBoundary(s, param, arg);
         s = ReplaceQualified(s, defName, materializedName);
+        return s;
+    }
+
+    /// <summary>
+    /// Substitutes a type-parameter name in a literal string (a primitive
+    /// `as T` / `is T` casts the target name as an ldstr for CastOrNull), but
+    /// only when the entire literal is exactly one type parameter name —
+    /// real user string data never matches a whole type-parameter word on its
+    /// own, so it is left untouched.
+    /// </summary>
+    private static string SubstituteTypeNameLiteral(string s, IReadOnlyDictionary<string, string> paramMap)
+    {
+        if (paramMap.TryGetValue(s, out var arg)) return arg;
         return s;
     }
 

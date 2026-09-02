@@ -37,7 +37,7 @@ public sealed class ReflectionJit : ExecutorBase
 
     public override void Reset(bool clearHeap = false, bool clearStatics = false)
     {
-        if (clearHeap) Heap.Clear();
+        if (clearHeap) State.ClearHeap();
         if (clearStatics) Array.Fill(StaticFields, Value.Nil());
     }
 
@@ -298,14 +298,14 @@ public sealed class ReflectionJit : ExecutorBase
             case Opcode.Ldfld:
             {
                 ushort fi = Interpreter.ReadU16(code, ref pc);
-                sb.Append($"    {{ var _o = s[--sp]; s[sp++] = MemoryMarshal.Read<Value>(x.Heap[(int)_o.AsObj()].AsSpan((int){mod.Fields[(int)fi].Offset}, 16)); }}");
+                sb.Append($"    {{ var _o = s[--sp]; var _buf = x.GetHeapBuffer(_o.AsObj()); if (_buf==null) return new VmError(VmErrorKind.OutOfBounds, \"ldfld oob\"); s[sp++] = MemoryMarshal.Read<Value>(_buf.AsSpan((int){mod.Fields[(int)fi].Offset}, 16)); }}");
                 break;
             }
 
             case Opcode.Stfld:
             {
                 ushort fi = Interpreter.ReadU16(code, ref pc);
-                sb.Append($"    {{ var _v = s[--sp]; var _o = s[--sp]; MemoryMarshal.Write(x.Heap[(int)_o.AsObj()].AsSpan((int){mod.Fields[(int)fi].Offset}, 16), in _v); }}");
+                sb.Append($"    {{ var _v = s[--sp]; var _o = s[--sp]; var _buf = x.GetHeapBuffer(_o.AsObj()); if (_buf==null) return new VmError(VmErrorKind.OutOfBounds, \"stfld oob\"); MemoryMarshal.Write(_buf.AsSpan((int){mod.Fields[(int)fi].Offset}, 16), in _v); }}");
                 break;
             }
 

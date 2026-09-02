@@ -18,12 +18,19 @@ public abstract class ExecutorBase : IExecutor
     // Compatibility aliases over State — existing interpreter/JIT code uses
     // Heap/StaticFields/InternString/GetStringValue directly.
     /// <summary>Heap — each object is a byte buffer sized by the type's instance_size.</summary>
-    public List<byte[]> Heap => State.Heap;
+    public List<byte[]?> Heap => State.Heap;
+
+    /// <summary>VMHeap accessor seam for V2 handle table.</summary>
+    public byte[]? GetHeapBuffer(uint handle) => State.GetHeapBuffer(handle);
+    public bool TryGetHeapBuffer(uint handle, out byte[]? buf) => State.TryGetHeapBuffer(handle, out buf);
 
     /// <summary>Static field storage.</summary>
     public Value[] StaticFields => State.StaticFields;
 
     private Func<string, object?[], object?>? _nativeCall;
+
+    public ObjectRT.Abstractions.GC.GCStats GCStats => State.GCStats;
+    public bool CollectGC(ObjectRT.Abstractions.GC.GCReason reason = ObjectRT.Abstractions.GC.GCReason.Explicit) => State.CollectGC(reason);
 
     public Func<string, object?[], object?>? NativeCallHandler
     {
@@ -108,9 +115,26 @@ public abstract class ExecutorBase : IExecutor
             return new VmError(VmErrorKind.InvalidTypeIndex,
                 $"type index {typeIdx} out of bounds ({Mod.Types.Count})");
         var type = Mod.GetType(typeIdx);
-        var data = new byte[type.InstanceSize];
-        uint handle = (uint)Heap.Count;
-        Heap.Add(data);
+        uint instanceSize = type.InstanceSize;
+
+        // — Pressure / threshold / OOM handling (PR4) —
+        // Note: AllocatedBytes check is lock-protected inside VMHeap, but we read via State.AllocatedBytes
+        // which is itself lock-protected. Trigger STW GC before bump if needed.
+        var heapOpts = State.HeapOptions;
+        if (heapOpts.MaximumHeapSizeBytes > 0 && State.AllocatedBytes + instanceSize > heapOpts.MaximumHeapSizeBytes)
+        {
+            State.CollectGC(ObjectRT.Abstractions.GC.GCReason.AllocationFailure);
+            if (State.AllocatedBytes + instanceSize > heapOpts.MaximumHeapSizeBytes)
+                return new VmError(VmErrorKind.OutOfBounds,
+                    $"heap OOM: need {instanceSize} bytes, allocated {State.AllocatedBytes}, max {heapOpts.MaximumHeapSizeBytes}");
+        }
+        if (State.GC.ShouldCollect(State.AllocatedBytes))
+        {
+            State.CollectGC(ObjectRT.Abstractions.GC.GCReason.Threshold);
+        }
+        // Single large object larger than threshold: after GC we still allocate (no loop)
+
+        uint handle = State.VMHeap.Allocate(instanceSize);
         // Remember the allocating type so virtual dispatch can walk the
         // receiver's concrete chain (ExecutorState.ObjectTypes).
         State.RecordObjectType(handle, (int)typeIdx);

@@ -2,6 +2,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\..\ObjektRT.Core\ObjektRT.Core.csproj" />
+    <ProjectReference Include="..\ObjectRT.Abstractions\ObjectRT.Abstractions.csproj" />
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.11.0" />
   </ItemGroup>
 

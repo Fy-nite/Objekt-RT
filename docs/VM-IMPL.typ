@@ -95,16 +95,30 @@ All four layers were updated in lockstep for this change:
 Scripts use `call` for everything. `callnative` is kept as a backward-compat
 alias with the same encoding and dispatch path.
 
+= GC
+
+See `GC-IMPL.typ` for the full V1 precise STW mark-sweep. Summary:
+
++ *Heap*: `VMHeap` (`List<byte[]?>` slots, free-handle stack, `AllocatedBytes`) behind `GetHeapBuffer` seam (`ExecutorState.cs`, `Interpreter.cs:ldfld/stfld`, `ReflectionJit.cs`, `StructMarshaller.cs`).
++ *Safepoint*: `SafepointCoordinator` per `ExecutorState` (`VM/GC/Safepoint/`), cooperative `CheckSafepoint()` at dispatch top, `IsInNative` logically parked, `Register`/`Unregister` ephemeral interpreters (`Runtime.cs:CallMethodViaVm` re-entry, `InvokeDelegate`, `SpawnThread`/`StartThread`).
++ *Collector*: `MarkSweepGC` iterative `Stack<uint>` worklist, roots = `StaticFields` + all `LiveSnapshot` stacks/frames/exception `PendingException` + `DirectStack` when `IsInNative`, heap-field `Value` stride 16, external scavenge `object[]`/`List<object>` boxed handles + `ThreadHandle.DelegateHandle` via reflection.
++ Generational collection will primarily require write-barrier integration at VMHeap write sites, plus collector-specific root/young-generation handling — Interpreter stays GC-agnostic.
+
 = Source files
 
 ```
 src/ObjectRT.VM/
 ├── IExecutor.cs         — pluggable executor interface
-├── ExecutorBase.cs      — shared state (heap, statics, strings, marshal)
-├── Interpreter.cs       — iterative bytecode dispatch (tag-aware arithmetic)
-├── ReflectionJit.cs     — bytecode → C# → Roslyn → delegates, disk cache
+├── ExecutorBase.cs      — shared state (heap, statics, strings, marshal, AllocObject pressure)
+├── ExecutorState.cs     — VMHeap, Coordinator, GC, GCStats, external table
+├── Interpreter.cs       — iterative bytecode dispatch + safepoints (IsParked/IsInNative)
+├── ReflectionJit.cs     — bytecode → C# → Roslyn → delegates, disk cache (GetHeapBuffer seam)
 ├── Value.cs             — 16-byte tagged union
 ├── CompiledModule.cs    — flat VM module (types, fields, functions, strings)
 ├── ModuleCompiler.cs    — ORBTModule → CompiledModule
-└── VmError.cs           — error kinds + Result<T> type
+├── VmError.cs           — error kinds + Result<T> type
+├── Memory/VMHeap.cs      — slots, free list, AllocatedBytes, accessors
+└── GC/
+    ├── MarkSweepGC.cs            — STW mark-sweep, external scavenge, stats
+    └── Safepoint/SafepointCoordinator.cs
 ```

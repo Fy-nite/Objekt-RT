@@ -1,4 +1,7 @@
 using System.Collections.Generic;
+using ObjectRT.Abstractions.GC;
+using ObjectRT.VM.GC.Safepoint;
+using ObjectRT.VM.Memory;
 
 namespace ObjectRT.VM;
 
@@ -18,7 +21,17 @@ namespace ObjectRT.VM;
 public sealed class ExecutorState
 {
     /// <summary>Heap — each object is a byte buffer sized by the type's instance_size.</summary>
-    public readonly List<byte[]> Heap = new();
+    public readonly List<byte[]?> Heap = new();
+
+    /// <summary>VMHeap abstraction — free list, counters, accessors. Seam for V2 handle table.</summary>
+    internal VMHeap VMHeap { get; }
+
+    public HeapOptions HeapOptions { get; }
+
+    internal SafepointCoordinator Coordinator { get; } = new();
+
+    internal GC.MarkSweepGC GC { get; }
+    public GCStats GCStats => GC.Stats;
 
     /// <summary>
     /// Heap handle → allocating type index. The VM's objects are plain byte
@@ -42,8 +55,19 @@ public sealed class ExecutorState
     private readonly List<string?> _strings = new();
     private readonly object _stringLock = new();
 
-    public ExecutorState(CompiledModule mod)
+    public ExecutorState(CompiledModule mod) : this(mod, new HeapOptions()) { }
+
+    public ExecutorState(CompiledModule mod, HeapOptions heapOptions) : this(mod, heapOptions, new GCOptions()) { }
+
+    public ExecutorState(CompiledModule mod, HeapOptions heapOptions, GCOptions gcOptions)
     {
+        HeapOptions = heapOptions;
+        // Pre-size List capacity per InitialHeapCapacitySlots
+        int cap = heapOptions.InitialHeapCapacitySlots > 0 ? heapOptions.InitialHeapCapacitySlots : 2048;
+        Heap.Capacity = cap;
+        VMHeap = new VMHeap(Heap);
+        GC = new GC.MarkSweepGC(gcOptions);
+
         StaticFields = new Value[mod.Fields.Count];
         System.Array.Fill(StaticFields, Value.Nil());
 
@@ -91,6 +115,9 @@ public sealed class ExecutorState
 
     private readonly List<object?> _externals = new();
     private readonly object _externalLock = new();
+    internal List<object?> ExternalsUnsafe => _externals;
+    internal object ExternalsLock => _externalLock;
+    internal int ExternalCountUnsafe => _externals.Count;
 
     /// <summary>Interns a CLR object reference and returns its external handle.</summary>
     public uint InternExternal(object? obj)
@@ -112,4 +139,22 @@ public sealed class ExecutorState
 
     /// <summary>True when an Obj-tag handle is an external CLR reference.</summary>
     public static bool IsExternal(uint handle) => (handle & ExternalHandleFlag) != 0;
+
+    // ── VMHeap seam (V1 raw indices + null holes, V2 handle table) ──────────
+
+    public byte[]? GetHeapBuffer(uint handle) => VMHeap.GetHeapBuffer(handle);
+    public bool TryGetHeapBuffer(uint handle, out byte[]? buf) => VMHeap.TryGetBuffer(handle, out buf);
+    public Span<byte> GetHeapSpan(uint handle) => VMHeap.GetHeapSpan(handle);
+
+    public long AllocatedBytes => VMHeap.AllocatedBytes;
+    public int HeapCapacitySlots => VMHeap.Capacity;
+    public int FreeSlots => VMHeap.FreeSlots;
+
+    public void ClearHeap()
+    {
+        VMHeap.Clear();
+        ObjectTypes.Clear();
+    }
+
+    public bool CollectGC(GCReason reason = GCReason.Explicit) => GC.Collect(this, reason);
 }

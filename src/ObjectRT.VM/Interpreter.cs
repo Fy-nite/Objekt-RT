@@ -73,8 +73,52 @@ public sealed class Interpreter : ExecutorBase
     // ── Exception handling ──────────────────────────────────────────
     private readonly Stack<ExceptionFrame> _exceptionHandlers = new();
 
-    public Interpreter(CompiledModule mod) : base(mod) { _traceEnvEnabled = Environment.GetEnvironmentVariable("ORTRT_TRACE") == "1"; }
-    public Interpreter(CompiledModule mod, ExecutorState? shared) : base(mod, shared) { _traceEnvEnabled = Environment.GetEnvironmentVariable("ORTRT_TRACE") == "1"; }
+    // ── Safepoint (STW GC) ────────────────────────────────────────────
+    internal bool IsParked { get; private set; }
+    internal bool IsInNative { get; private set; }
+
+    // For GC root enumeration (world stopped, no concurrent mutation)
+    internal List<Value> StackForGC => _stack;
+    internal List<Frame> FramesForGC => _frames;
+    internal Stack<ExceptionFrame> ExceptionHandlersForGC => _exceptionHandlers;
+    internal Value[] DirectStackForGC => _directStack;
+
+    public Interpreter(CompiledModule mod) : base(mod) { _traceEnvEnabled = Environment.GetEnvironmentVariable("ORTRT_TRACE") == "1"; State.Coordinator.Register(this); }
+    public Interpreter(CompiledModule mod, ExecutorState? shared) : base(mod, shared) { _traceEnvEnabled = Environment.GetEnvironmentVariable("ORTRT_TRACE") == "1"; State.Coordinator.Register(this); }
+
+    public void Unregister() => State.Coordinator.Unregister(this);
+
+    internal void EnterSafepointPark(GC.Safepoint.SafepointCoordinator coord)
+    {
+        IsParked = true;
+        coord.OnInterpreterParked();
+        coord.WaitUntilResumed();
+        IsParked = false;
+    }
+
+    internal void CheckSafepoint()
+    {
+        if (State.Coordinator.IsGcRequested && !IsInNative)
+        {
+            IsParked = true;
+            State.Coordinator.OnInterpreterParked();
+            State.Coordinator.WaitUntilResumed();
+            IsParked = false;
+        }
+    }
+
+    internal IDisposable EnterNativeScope()
+    {
+        IsInNative = true;
+        return new NativeScope(this);
+    }
+
+    private sealed class NativeScope : IDisposable
+    {
+        private readonly Interpreter _interp;
+        public NativeScope(Interpreter interp) => _interp = interp;
+        public void Dispose() => _interp.IsInNative = false;
+    }
 
     public bool Trace { get => _trace; set => _trace = value; }
 
@@ -110,7 +154,7 @@ public sealed class Interpreter : ExecutorBase
         _frames.Clear();
         _currentFuncName = "";
         _exceptionHandlers.Clear();
-        if (clearHeap) Heap.Clear();
+        if (clearHeap) State.ClearHeap();
         if (clearStatics) Array.Fill(StaticFields, Value.Nil());
     }
 
@@ -162,6 +206,9 @@ public sealed class Interpreter : ExecutorBase
                     return Err(VmErrorKind.StepBudgetExceeded,
                         $"instruction budget exceeded ({_maxSteps} steps)");
                 _currentPc = pc; // instruction start — used for error reporting
+
+                // ── GC safepoint ──
+                CheckSafepoint();
 
                 // ── Debug hook: check breakpoints, stepping, pause ──
                 if (DebugState != null && DebugState.CheckPause(frame.Func.DebugName, pc, _frames.Count, Mod))
@@ -267,8 +314,9 @@ public sealed class Interpreter : ExecutorBase
                         var obj = Pop();
                         if (obj.Tag != ValueTag.Obj) return Err(VmErrorKind.NotAnObject, "ldfld on non-object");
                         uint h = obj.AsObj();
-                        if (h >= Heap.Count || fld.Offset + 16 > Heap[(int)h].Length) return Err(VmErrorKind.OutOfBounds, "ldfld oob");
-                        Push(MemoryMarshal.Read<Value>(Heap[(int)h].AsSpan((int)fld.Offset, 16)));
+                        if (ExecutorState.IsExternal(h)) return Err(VmErrorKind.NotAnObject, "ldfld on external handle");
+                        if (!State.TryGetHeapBuffer(h, out var buf) || buf == null || fld.Offset + 16 > (uint)buf.Length) return Err(VmErrorKind.OutOfBounds, "ldfld oob");
+                        Push(MemoryMarshal.Read<Value>(buf.AsSpan((int)fld.Offset, 16)));
                         break;
                     }
                     case Opcode.Stfld:
@@ -279,8 +327,9 @@ public sealed class Interpreter : ExecutorBase
                         var val = Pop(); var obj = Pop();
                         if (obj.Tag != ValueTag.Obj) return Err(VmErrorKind.NotAnObject, "stfld on non-object");
                         uint h = obj.AsObj();
-                        if (h >= Heap.Count || fld.Offset + 16 > Heap[(int)h].Length) return Err(VmErrorKind.OutOfBounds, "stfld oob");
-                        MemoryMarshal.Write(Heap[(int)h].AsSpan((int)fld.Offset, 16), in val);
+                        if (ExecutorState.IsExternal(h)) return Err(VmErrorKind.NotAnObject, "stfld on external handle");
+                        if (!State.TryGetHeapBuffer(h, out var buf) || buf == null || fld.Offset + 16 > (uint)buf.Length) return Err(VmErrorKind.OutOfBounds, "stfld oob");
+                        MemoryMarshal.Write(buf.AsSpan((int)fld.Offset, 16), in val);
                         break;
                     }
                     case Opcode.Ldsfld:
@@ -412,9 +461,11 @@ public sealed class Interpreter : ExecutorBase
                                 _directStack[i] = _stack[spBase + i];
 
                             int newSp;
+                            IsInNative = true;
                             try { newSp = directCall(this, _directStack, 0); }
                             catch (VmRuntimeException vre) { return vre.Error; }
                             catch (Exception ex) { return Err(VmErrorKind.RuntimeError, $"call '{name}': {ex.Message}"); }
+                            finally { IsInNative = false; }
 
                             // Sync backing array → List stack: remove args, push results.
                             // Calls follow one uniform convention: a feature always leaves
@@ -452,8 +503,10 @@ public sealed class Interpreter : ExecutorBase
                             }
                         }
                         object? result;
+                        IsInNative = true;
                         try { result = handler(name, args); }
                         catch (Exception ex) { return Err(VmErrorKind.RuntimeError, $"call '{name}': {ex.Message}"); }
+                        finally { IsInNative = false; }
                         // Struct returns arrive as C-layout bytes; unpack them
                         // into a fresh heap object (handling nested structs).
                         if (nativeStub?.ReturnTypeName is string rtn && StructMarshaller.IsStructType(Mod, rtn))
@@ -1028,7 +1081,8 @@ public sealed class Interpreter : ExecutorBase
     /// </summary>
     public static (string? Target, Value Closure, bool HasClosure) ReadDelegate(CompiledModule mod, ExecutorState state, uint handle)
     {
-        if (handle >= state.Heap.Count)
+        if (ExecutorState.IsExternal(handle)) return (null, default, false);
+        if (!state.TryGetHeapBuffer(handle, out var delegateBuf) || delegateBuf == null)
             return (null, default, false);
 
         // Use cached Delegate type index instead of O(n) linear scan
@@ -1041,18 +1095,18 @@ public sealed class Interpreter : ExecutorBase
         var targetField = mod.Fields[(int)dt.FieldOffset];      // target
         var closureField = mod.Fields[(int)dt.FieldOffset + 1]; // closure
 
-        if (targetField.Offset + 16 > (uint)state.Heap[(int)handle].Length)
+        if (targetField.Offset + 16 > (uint)delegateBuf.Length)
             return (null, default, false);
-        var targetVal = MemoryMarshal.Read<Value>(state.Heap[(int)handle].AsSpan((int)targetField.Offset, 16));
+        var targetVal = MemoryMarshal.Read<Value>(delegateBuf.AsSpan((int)targetField.Offset, 16));
         if (targetVal.Tag != ValueTag.Str)
             return (null, default, false);
         string target = state.GetStringValue(targetVal.AsStr()) ?? "";
 
         bool hasClosure = false;
         Value closure = Value.Nil();
-        if (closureField.Offset + 16 <= (uint)state.Heap[(int)handle].Length)
+        if (closureField.Offset + 16 <= (uint)delegateBuf.Length)
         {
-            closure = MemoryMarshal.Read<Value>(state.Heap[(int)handle].AsSpan((int)closureField.Offset, 16));
+            closure = MemoryMarshal.Read<Value>(delegateBuf.AsSpan((int)closureField.Offset, 16));
             hasClosure = closure.Tag == ValueTag.Obj;
         }
         return (target, closure, hasClosure);

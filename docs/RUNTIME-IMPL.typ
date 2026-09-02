@@ -120,11 +120,29 @@ and just `Assembly.Load` the cached DLL from disk.
   suppressions for CS8600, CS8601, CS8602, CS8603, CS8604, CS8605, CS8625
   or the consuming project warns on the generated hard casts.
 
+= GC Host Surface
+
+Public vocabulary in `ObjectRT.Abstractions/GC/` (`HeapOptions`, `GCOptions`, `GCCollectorKind`, `GCReason`, `GCStats`, `RuntimeOptions`; `ObjectRT.Abstractions <- VM, Runtime`):
+
+```csharp
+HeapOptions { InitialHeapCapacitySlots = 2048, MaximumHeapSizeBytes = 0 }
+GCOptions   { Collector=MarkSweep, InitialThreshold=64 KiB, GrowthFactor=2.0, MinHeadroom=16 KiB }
+Runtime(RuntimeOptions? opts = null)
+GCStats GCStats { get; }
+bool CollectGC(GCReason reason = Explicit) // STW, stats updated
+```
+
+Pressure: `ExecutorBase.AllocObject` checks `MaximumHeapSizeBytes` -> `Collect(AllocationFailure)` -> OOM, and `ShouldCollect(AllocatedBytes)` -> `Collect(Threshold)` with adaptive `NextGCThreshold = clamp(Live*GrowthFactor, Live+MinHeadroom, InitialThreshold)` (`MarkSweepGC.cs`).
+
+Roots for GC are `StaticFields` + all `Coordinator.LiveSnapshot()` interpreters (stacks/frames/exception/DirectStack). Host globals in `InterfaceHostResolver._hosts` are *not* VM roots; long-lived handles must be via `_externals` `object[]`/`List<object>` to be scavenged.
+
 = Source files
 
 ```
+src/ObjectRT.Abstractions/GC/
+├── HeapOptions.cs, GCOptions.cs, GCCollectorKind.cs, GCReason.cs, GCStats.cs, RuntimeOptions.cs
 src/ObjectRT.Runtime/
-├── Runtime.cs                    — host, module loading, method dispatch, JIT config
+├── Runtime.cs                    — host, module loading, method dispatch, JIT config, GCStats/CollectGC, ephemeral interpreter Register/Unregister
 ├── ClrNativeResolver.cs          — reflection-based static method resolution
 ├── InterfaceHostResolver.cs      — host interface dispatch (generated + reflection)
 ├── INativeResolver.cs            — resolver interface
@@ -135,4 +153,6 @@ src/ObjectRT.Runtime/
 ├── IRRuntimeBinding.cs           — late-bound call handle
 ├── ProxyRegistry.cs              — source-generated proxy registration
 └── JitMode.cs                    — interpreter/reflection/LLVM enum
+docs/
+└── GC-IMPL.typ                   — full GC design (sizing, handles, STW, roots, externals, allocation, compaction seam, tests)
 ```

@@ -53,9 +53,8 @@ public static class StructMarshaller
         if (value.Tag != ValueTag.Obj)
             return new VmError(VmErrorKind.TypeMismatch, $"struct argument '{typeName}' is not an object");
         uint h = value.AsObj();
-        if (h >= ex.Heap.Count)
+        if (ExecutorState.IsExternal(h) || !ex.State.TryGetHeapBuffer(h, out var slots) || slots == null)
             return new VmError(VmErrorKind.InvalidObjectHandle, $"struct argument '{typeName}' has an invalid handle");
-        var slots = ex.Heap[(int)h];
         var cache = new Dictionary<string, LayoutInfo>(StringComparer.Ordinal);
         var info = LayoutOf(mod, mod.Types[ti].DebugName, cache);
         var data = new byte[info.Size];
@@ -77,7 +76,8 @@ public static class StructMarshaller
             return new VmError(VmErrorKind.TypeMismatch, $"'{typeName}' is not a struct type");
         var alloc = ex.AllocObject((uint)ti);
         if (alloc.IsError) return alloc.Error;
-        var slots = ex.Heap[(int)alloc.Value];
+        if (!ex.State.TryGetHeapBuffer(alloc.Value, out var slots) || slots == null)
+            return new VmError(VmErrorKind.InvalidObjectHandle, $"struct '{typeName}' allocation returned invalid handle");
         var cache = new Dictionary<string, LayoutInfo>(StringComparer.Ordinal);
         int offset = 0;
         if (!TryUnpackFields(mod, ex, mod.Types[ti], slots, data, ref offset, cache, out var err))
@@ -99,9 +99,9 @@ public static class StructMarshaller
             {
                 var subInfo = LayoutOf(mod, mod.Types[subIdx].DebugName, cache);
                 offset = AlignUp(offset, subInfo.Align);
-                if (fv.Tag == ValueTag.Obj && fv.AsObj() < ex.Heap.Count)
+                if (fv.Tag == ValueTag.Obj && !ExecutorState.IsExternal(fv.AsObj()) && ex.State.TryGetHeapBuffer(fv.AsObj(), out var nestedSlots) && nestedSlots != null)
                 {
-                    if (!TryPackFields(mod, ex, mod.Types[subIdx], ex.Heap[(int)fv.AsObj()], data, ref offset, cache, out error))
+                    if (!TryPackFields(mod, ex, mod.Types[subIdx], nestedSlots, data, ref offset, cache, out error))
                         return false;
                 }
                 else offset += subInfo.Size;   // nil / missing nested struct → zero-fill
@@ -174,7 +174,8 @@ public static class StructMarshaller
                 }
                 var alloc = ex.AllocObject((uint)subIdx);
                 if (alloc.IsError) { error = alloc.Error.Message; return false; }
-                if (!TryUnpackFields(mod, ex, mod.Types[subIdx], ex.Heap[(int)alloc.Value], data, ref offset, cache, out error))
+                if (!ex.State.TryGetHeapBuffer(alloc.Value, out var nestedSlots) || nestedSlots == null) { error = "nested alloc returned invalid handle"; return false; }
+                if (!TryUnpackFields(mod, ex, mod.Types[subIdx], nestedSlots, data, ref offset, cache, out error))
                     return false;
                 var nestedVal = Value.FromObj(alloc.Value);
                 MemoryMarshal.Write(slots.AsSpan(i * (int)VmConstants.FieldSlotSize, 16), in nestedVal);
