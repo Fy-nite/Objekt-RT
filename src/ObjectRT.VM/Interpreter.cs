@@ -544,6 +544,102 @@ public sealed class Interpreter : ExecutorBase
                             Push(Value.FromI4(arr.Length));
                             break;
                         }
+
+                    // ── Pointer operations ─────────────────────────────
+                    // A pointer value is an Obj-tag external handle to a
+                    // PtrBlock. Typed deref reads/writes through the block,
+                    // bound-checked against its length.
+                    case Opcode.Ldptr: case Opcode.LdptrI8:
+                    case Opcode.LdptrR4: case Opcode.LdptrR8:
+                    {
+                        var block = PopPtrBlock();
+                        if (block == null)
+                            return Err(VmErrorKind.NotAnObject, "ldptr on non-pointer");
+                        long addr = block.Address.ToInt64();
+                        int size = (Opcode)op switch
+                        {
+                            Opcode.Ldptr   => sizeof(int),
+                            Opcode.LdptrI8 => sizeof(long),
+                            Opcode.LdptrR4 => sizeof(float),
+                            _              => sizeof(double),
+                        };
+                        int offset = block.ElementSize > 0 ? 0 : 0;
+                        block.ValidateRange(offset, size);
+                        switch ((Opcode)op)
+                        {
+                            case Opcode.Ldptr:   Push(Value.FromI4(Marshal.ReadInt32(block.Address, offset))); break;
+                            case Opcode.LdptrI8: Push(Value.FromI8(Marshal.ReadInt64(block.Address, offset))); break;
+                            case Opcode.LdptrR4: Push(Value.FromR4(Marshal.ReadInt32(block.Address, offset))); break; // reinterpret
+                            case Opcode.LdptrR8: Push(Value.FromR8(Marshal.ReadInt64(block.Address, offset))); break;
+                        }
+                        break;
+                    }
+                    case Opcode.StptrI4:
+                    case Opcode.StptrI8:
+                    case Opcode.StptrR4:
+                    case Opcode.StptrR8:
+                    {
+                        var val = Pop();
+                        var block = PopPtrBlock();
+                        if (block == null)
+                            return Err(VmErrorKind.NotAnObject, "stptr on non-pointer");
+                        int size = (Opcode)op switch
+                        {
+                            Opcode.StptrI4 => sizeof(int),
+                            Opcode.StptrI8 => sizeof(long),
+                            Opcode.StptrR4 => sizeof(float),
+                            _             => sizeof(double),
+                        };
+                        block.ValidateRange(0, size);
+                        switch ((Opcode)op)
+                        {
+                            case Opcode.StptrI4: Marshal.WriteInt32(block.Address, val.Tag == ValueTag.I8 ? (int)val.I8 : val.I4); break;
+                            case Opcode.StptrI8: Marshal.WriteInt64(block.Address, val.Tag == ValueTag.I4 ? val.I4 : val.I8); break;
+                            case Opcode.StptrR4: Marshal.WriteInt32(block.Address, BitConverter.SingleToInt32Bits(val.Tag == ValueTag.R8 ? (float)val.R8 : val.R4)); break;
+                            case Opcode.StptrR8: Marshal.WriteInt64(block.Address, BitConverter.DoubleToInt64Bits(val.Tag == ValueTag.R4 ? val.R4 : val.R8)); break;
+                        }
+                        break;
+                    }
+                    case Opcode.PtrAddr:
+                    {
+                        var block = PopPtrBlock();
+                        if (block == null)
+                            return Err(VmErrorKind.NotAnObject, "ptr.addr on non-pointer");
+                        Push(Value.FromI8(block.Address.ToInt64()));
+                        break;
+                    }
+                    case Opcode.PtrLen:
+                    {
+                        var block = PopPtrBlock();
+                        if (block == null)
+                            return Err(VmErrorKind.NotAnObject, "ptr.len on non-pointer");
+                        Push(Value.FromI4(block.Count));
+                        break;
+                    }
+                    case Opcode.PtrAlloc:
+                    {
+                        var size = Pop();
+                        var count = Pop();
+                        try
+                        {
+                            var block = PtrBlock.Alloc(count.I4, size.I4);
+                            Push(Value.FromObj(State.InternExternal(block)));
+                        }
+                        catch (Exception ex)
+                        {
+                            return Err(VmErrorKind.RuntimeError, $"ptr.alloc: {ex.Message}");
+                        }
+                        break;
+                    }
+                    case Opcode.PtrFree:
+                    {
+                        var block = PopPtrBlock();
+                        if (block == null)
+                            return Err(VmErrorKind.NotAnObject, "ptr.free on non-pointer");
+                        block.Free();
+                        break;
+                    }
+
                     case Opcode.Conv: case Opcode.Castclass: { ReadU16(code, ref pc); break; }
                     case Opcode.Isinst:
                     {
@@ -813,6 +909,16 @@ public sealed class Interpreter : ExecutorBase
         var result = State.GetExternal(v.AsObj()) as System.Array;
         return result;
     }
+
+    /// <summary>Pops the top stack value and resolves it to a <see cref="PtrBlock"/>, or null when it isn't one.</summary>
+    private PtrBlock? PopPtrBlock()
+    {
+        var v = Pop();
+        if (v.Tag != ValueTag.Obj || !ExecutorState.IsExternal(v.AsObj()))
+            return null;
+        return State.GetExternal(v.AsObj()) as PtrBlock;
+    }
+
 
     /// <summary>
     /// Virtual dispatch: for a callvirt "Type.Method(argc args)" whose receiver

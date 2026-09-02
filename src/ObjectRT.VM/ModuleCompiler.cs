@@ -820,9 +820,26 @@ public class ModuleCompiler
                     if (state.CurrentDepth > 0) state.CurrentDepth--;
                     break;
 
+                case Opcode.StptrI4: case Opcode.StptrI8:
+                case Opcode.StptrR4: case Opcode.StptrR8:
+                case Opcode.PtrFree:
+                    // pop 2 (value + pointer) or 1 (pointer) → net -2 / -1
+                    if (state.CurrentDepth > 0) state.CurrentDepth--;
+                    if ((Opcode)instr.Opcode != Opcode.PtrFree && state.CurrentDepth > 0)
+                        state.CurrentDepth--;
+                    break;
+
+                case Opcode.PtrAlloc:
+                    // pop 2 (count,size), push 1 → net -1
+                    if (state.CurrentDepth > 1) state.CurrentDepth--;
+                    break;
+
                 case Opcode.Neg: case Opcode.Not:
                 case Opcode.Call: case Opcode.Callvirt:
                 case Opcode.Ldlen: // pop 1, push 1 → net 0
+                case Opcode.Ldptr: case Opcode.LdptrI8:
+                case Opcode.LdptrR4: case Opcode.LdptrR8:
+                case Opcode.PtrAddr: case Opcode.PtrLen: // pop 1, push 1 → net 0
                     // neutral for now
                     break;
             }
@@ -842,6 +859,12 @@ public class ModuleCompiler
                 case Opcode.Pop: case Opcode.Ldnull: case Opcode.Ret:
                 case Opcode.Break: case Opcode.Continue:
                 case Opcode.Throw: case Opcode.Ldelem: case Opcode.Stelem:
+                case Opcode.Ldptr: case Opcode.LdptrI8:
+                case Opcode.LdptrR4: case Opcode.LdptrR8:
+                case Opcode.StptrI4: case Opcode.StptrI8:
+                case Opcode.StptrR4: case Opcode.StptrR8:
+                case Opcode.PtrAddr: case Opcode.PtrLen:
+                case Opcode.PtrAlloc: case Opcode.PtrFree:
                     break;
 
                 case Opcode.LdcI4:
