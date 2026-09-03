@@ -1190,6 +1190,19 @@ public sealed class Interpreter : ExecutorBase
         if (a.Tag == ValueTag.I8 && b.Tag == ValueTag.I8) return Value.FromI8(opI8(a.I8, b.I8));
         if (a.Tag == ValueTag.R4 && b.Tag == ValueTag.R4) return Value.FromR4(opR4(a.R4, b.R4));
         if (a.Tag == ValueTag.R8 && b.Tag == ValueTag.R8) return Value.FromR8(opR8(a.R8, b.R8));
+        // Mixed-type promotion (follows C# rules: int → long → float → double)
+        if (a.Tag == ValueTag.I4 && b.Tag == ValueTag.I8) return Value.FromI8(opI8(a.I4, b.I8));
+        if (a.Tag == ValueTag.I8 && b.Tag == ValueTag.I4) return Value.FromI8(opI8(a.I8, b.I4));
+        if (a.Tag == ValueTag.I4 && b.Tag == ValueTag.R4) return Value.FromR4(opR4(a.I4, b.R4));
+        if (a.Tag == ValueTag.R4 && b.Tag == ValueTag.I4) return Value.FromR4(opR4(a.R4, b.I4));
+        if (a.Tag == ValueTag.I8 && b.Tag == ValueTag.R4) return Value.FromR8(opR8(a.I8, b.R4));
+        if (a.Tag == ValueTag.R4 && b.Tag == ValueTag.I8) return Value.FromR8(opR8(a.R4, b.I8));
+        if (a.Tag == ValueTag.I4 && b.Tag == ValueTag.R8) return Value.FromR8(opR8(a.I4, b.R8));
+        if (a.Tag == ValueTag.R8 && b.Tag == ValueTag.I4) return Value.FromR8(opR8(a.R8, b.I4));
+        if (a.Tag == ValueTag.I8 && b.Tag == ValueTag.R8) return Value.FromR8(opR8(a.I8, b.R8));
+        if (a.Tag == ValueTag.R8 && b.Tag == ValueTag.I8) return Value.FromR8(opR8(a.R8, b.I8));
+        if (a.Tag == ValueTag.R4 && b.Tag == ValueTag.R8) return Value.FromR8(opR8(a.R4, b.R8));
+        if (a.Tag == ValueTag.R8 && b.Tag == ValueTag.R4) return Value.FromR8(opR8(a.R8, b.R4));
         return Value.FromR8(opR8(ToDouble(a), ToDouble(b)));
     }
 
