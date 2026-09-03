@@ -354,6 +354,7 @@ public sealed class ClrNativeResolver : INativeResolver
         if (target == typeof(long) && v is int i3) return (long)i3;
         if (target == typeof(string)) return v.ToString();
         if (target.IsArray && v is System.Array srcArr) return CoerceArray(srcArr, target.GetElementType()!);
+        if (Array.IndexOf(NarrowIntegralTypes, target) >= 0) return CoerceNarrowIntegral(target, v);
         return v;
     }
 
@@ -447,8 +448,42 @@ public sealed class ClrNativeResolver : INativeResolver
         if (target == typeof(float) && v is long l3) return (float)l3;
         if (target == typeof(float) && v is double d3) return (float)d3;
         if (target == typeof(long) && v is int i4) return (long)i4;
+        // Narrow integral targets: the VM marshals every byte/sbyte/short/ushort
+        // element/argument as a boxed int (I4), so convert it down to the declared
+        // element type here. Without this, Array.SetValue / reflection Invoke
+        // reject the boxed source with "Cannot widen from source type...".
+        if (target == typeof(byte) && v is int ib) return (byte)ib;
+        if (target == typeof(sbyte) && v is int isb) return (sbyte)isb;
+        if (target == typeof(short) && v is int ish) return (short)ish;
+        if (target == typeof(ushort) && v is int iush) return (ushort)iush;
+        if (target == typeof(uint) && v is int iui) return (uint)iui;
+        if (target == typeof(byte) && v is long lb) return (byte)lb;
+        if (target == typeof(sbyte) && v is long lsb) return (sbyte)lsb;
+        if (target == typeof(short) && v is long lsh) return (short)lsh;
+        if (target == typeof(ushort) && v is long lush) return (ushort)lush;
         if (target == typeof(string)) return v.ToString();
         return v;
     }
+
+    #region Narrow integral coercion
+private static System.Type[] NarrowIntegralTypes { get; } =
+    new[] { typeof(byte), typeof(sbyte), typeof(short), typeof(ushort), typeof(uint) };
+
+/// <summary>Converts a boxed integral value to a narrow integral target type.</summary>
+private static object? CoerceNarrowIntegral(System.Type target, object v)
+{
+    if (target == typeof(byte))
+        return v is int ib ? (byte)ib : v is long lb ? (byte)lb : (byte)Convert.ToInt64(v);
+    if (target == typeof(sbyte))
+        return v is int isb ? (sbyte)isb : v is long lsb ? (sbyte)lsb : (sbyte)Convert.ToInt64(v);
+    if (target == typeof(short))
+        return v is int ish ? (short)ish : v is long lsh ? (short)lsh : (short)Convert.ToInt64(v);
+    if (target == typeof(ushort))
+        return v is int iush ? (ushort)iush : v is long lush ? (ushort)lush : (ushort)Convert.ToInt64(v);
+    if (target == typeof(uint))
+        return v is int iui ? (uint)iui : (uint)Convert.ToInt64(v);
+    return v;
+}
+#endregion
 }
 }
