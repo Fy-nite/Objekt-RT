@@ -105,16 +105,30 @@ public class ModuleCompiler
         for (int typeIdx = 0; typeIdx < src.Types.Count; typeIdx++)
         {
             var srcType = src.Types[typeIdx];
+            // A @Generic definition is a template: its real fields/methods only
+            // exist on the materialized clones later in src.Types (the templates
+            // themselves are emitted with no fields/methods, matching
+            // BuildResolutionTables which registers nothing for them). Zeroing
+            // MethodCount keeps BuildVTables from walking a method block that
+            // was never appended, and zeroing FieldCount/InstanceSize keeps the
+            // template from being instantiable (it never is).
+            bool genericTemplate = TryGetGenericParams(src, srcType, out _);
             var vmt = new VMType
             {
                 DebugName = src.Resolve(srcType.NameIndex),
                 Kind = (VMTypeKind)(byte)srcType.Kind,
                 BaseType = srcType.BaseTypeIndex,
                 FieldOffset = fieldIdx,
-                FieldCount = srcType.FieldCount,
-                MethodCount = srcType.MethodCount,
-                InstanceSize = (uint)sizeMemo[typeIdx],
+                FieldCount = genericTemplate ? 0u : srcType.FieldCount,
+                MethodCount = genericTemplate ? 0u : srcType.MethodCount,
+                InstanceSize = genericTemplate ? 0 : (uint)sizeMemo[typeIdx],
             };
+
+            if (genericTemplate)
+            {
+                mod.Types.Add(vmt);
+                continue;
+            }
 
             if (srcType.FieldCount > 0)
             {
