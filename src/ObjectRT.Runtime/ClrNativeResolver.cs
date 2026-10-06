@@ -230,7 +230,14 @@ public sealed class ClrNativeResolver : INativeResolver
 
         // Fallback: arity-only match (previous behavior) — keeps object
         // handles and untyped args working when no exact signature lines up.
-        best ??= methods.FirstOrDefault(m => m.GetParameters().Length == args.Length);
+        // Also matches methods whose extra parameters all have defaults.
+        best ??= methods.FirstOrDefault(m =>
+        {
+            var ps = m.GetParameters();
+            if (ps.Length == args.Length) return true;
+            if (ps.Length > args.Length) return HasOptionalTail(ps, args.Length);
+            return false;
+        });
         best ??= methods.Length > 0 ? methods[0] : null;
 
         if (best == null)
@@ -246,6 +253,22 @@ public sealed class ClrNativeResolver : INativeResolver
         return result;
     }
 
+    /// <summary>
+    /// Returns true if every parameter from <paramref name="startIndex"/> onward
+    /// has a default value (IsOptional) or the last parameter is a params array.
+    /// This lets callers omit trailing arguments when the CLR signature provides defaults.
+    /// </summary>
+    private static bool HasOptionalTail(ParameterInfo[] parameters, int startIndex)
+    {
+        for (int i = startIndex; i < parameters.Length; i++)
+        {
+            if (parameters[i].IsOptional) continue;
+            if (parameters[i].IsDefined(typeof(System.ParamArrayAttribute))) return true;
+            return false;
+        }
+        return true;
+    }
+
     /// <summary>Ranks and selects the best matching method for the supplied arguments.</summary>
     private static MethodInfo? MatchMethod(IEnumerable<MethodInfo> methods, object?[] args)
     {
@@ -254,11 +277,24 @@ public sealed class ClrNativeResolver : INativeResolver
         foreach (var m in methods)
         {
             var ps = m.GetParameters();
-            if (ps.Length != args.Length) continue;
+
+            // Accept fewer args when trailing parameters have defaults
+            // (or when a params array absorbs the shortfall).
+            if (ps.Length > args.Length)
+            {
+                if (!HasOptionalTail(ps, args.Length)) continue;
+            }
+            // Reject too many args unless the last parameter is a params array.
+            else if (ps.Length < args.Length)
+            {
+                if (ps.Length == 0 || !ps[^1].IsDefined(typeof(System.ParamArrayAttribute))) continue;
+            }
 
             int score = 0;
             bool compatible = true;
-            for (int i = 0; i < ps.Length && compatible; i++)
+            // Only rank the arguments that were actually supplied; the
+            // remainder will be filled from defaults at invocation time.
+            for (int i = 0; i < args.Length && compatible; i++)
             {
                 var target = ps[i].ParameterType;
                 var v = args[i];
@@ -298,10 +334,20 @@ public sealed class ClrNativeResolver : INativeResolver
         foreach (var c in ctors)
         {
             var ps = c.GetParameters();
-            if (ps.Length != args.Length) continue;
+            // Accept fewer args when trailing parameters have defaults
+            // (or when a params array absorbs the shortfall).
+            if (ps.Length > args.Length)
+            {
+                if (!HasOptionalTail(ps, args.Length)) continue;
+            }
+            else if (ps.Length < args.Length)
+            {
+                if (ps.Length == 0 || !ps[^1].IsDefined(typeof(System.ParamArrayAttribute))) continue;
+            }
             int score = 0;
             bool compatible = true;
-            for (int i = 0; i < ps.Length && compatible; i++)
+            // Only rank the arguments that were actually supplied.
+            for (int i = 0; i < args.Length && compatible; i++)
             {
                 var target = ps[i].ParameterType;
                 var v = args[i];
@@ -330,9 +376,30 @@ public sealed class ClrNativeResolver : INativeResolver
         catch { return false; }
     }
 
-    /// <summary>Coerces VM-marshaled argument values to a method's declared parameter types.</summary>
+    /// <summary>
+    /// Coerces VM-marshaled argument values to a method's declared parameter types.
+    /// If fewer args are supplied than parameters, pads the returned array with
+    /// CLR default values so that MethodInfo.Invoke accepts optional parameters.
+    /// </summary>
     private static object?[] CoerceArgs(ParameterInfo[] parameters, object?[] args)
     {
+        if (args.Length < parameters.Length)
+        {
+            var padded = new object?[parameters.Length];
+            for (int i = 0; i < args.Length; i++)
+                padded[i] = CoerceTo(parameters[i].ParameterType, args[i]);
+            for (int i = args.Length; i < parameters.Length; i++)
+            {
+                if (parameters[i].IsOptional)
+                    padded[i] = parameters[i].DefaultValue;
+                else if (parameters[i].IsDefined(typeof(System.ParamArrayAttribute)))
+                    padded[i] = Array.CreateInstance(parameters[i].ParameterType, 0);
+                else
+                    padded[i] = null;
+            }
+            return padded;
+        }
+
         for (int i = 0; i < parameters.Length && i < args.Length; i++)
             args[i] = CoerceTo(parameters[i].ParameterType, args[i]);
         return args;
@@ -343,6 +410,7 @@ public sealed class ClrNativeResolver : INativeResolver
     {
         if (v == null) return null;
         if (target.IsInstanceOfType(v)) return v;
+        if (target.IsEnum) return Enum.ToObject(target, Convert.ToInt64(v));
         if (target == typeof(bool) && v is int i0) return i0 != 0;
         if (target == typeof(int) && v is bool b0) return b0 ? 1 : 0;
         if (target == typeof(double) && v is int i1) return (double)i1;
@@ -371,32 +439,9 @@ public sealed class ClrNativeResolver : INativeResolver
                 // Coerce VM-marshaled values to the declared parameter types.
                 // The VM tags bools as I4 (1/0), so reflection Invoke would
                 // reject Debug.Assert(bool, ...) with an int argument.
-                for (int i = 0; i < parameters.Length && i < args.Length; i++)
-                {
-                    var target = parameters[i].ParameterType;
-                    var v = args[i];
-                    if (v == null) continue;
-                    if (target == typeof(bool) && v is int i4)
-                        args[i] = i4 != 0;
-                    else if (target == typeof(int) && v is bool b)
-                        args[i] = b ? 1 : 0;
-                    else if (target == typeof(double) && v is int i5)
-                        args[i] = (double)i5;
-                    else if (target == typeof(double) && v is long l5)
-                        args[i] = (double)l5;
-                    else if (target == typeof(double) && v is float f5)
-                        args[i] = (double)f5;
-                    else if (target == typeof(float) && v is int i6)
-                        args[i] = (float)i6;
-                    else if (target == typeof(float) && v is long l6)
-                        args[i] = (float)l6;
-                    else if (target == typeof(float) && v is double d6)
-                        args[i] = (float)d6;
-                    else if (target == typeof(long) && v is int i7)
-                        args[i] = (long)i7;
-                    else if (target.IsArray && v is System.Array srcArr)
-                        args[i] = CoerceArray(srcArr, target.GetElementType()!);
-                }
+                // Also pad with default values for optional parameters
+                // that were omitted by the caller.
+                args = CoerceArgs(parameters, args);
                 return method.Invoke(null, args);
             }
             catch (TargetInvocationException tie)
@@ -439,6 +484,7 @@ public sealed class ClrNativeResolver : INativeResolver
     {
         if (v == null) return null;
         if (target.IsInstanceOfType(v)) return v;
+        if (target.IsEnum) return Enum.ToObject(target, Convert.ToInt64(v));
         if (target == typeof(bool) && v is int i) return i != 0;
         if (target == typeof(int) && v is bool b) return b ? 1 : 0;
         if (target == typeof(double) && v is int i2) return (double)i2;

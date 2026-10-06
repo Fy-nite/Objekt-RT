@@ -223,6 +223,31 @@ Check(reflBin.GetType("MathBase")?.GetField("factor") is { IsStatic: true }, "st
 Check(reflBin.GetType("Shape")?.GetField("id") is { IsStatic: false }, "instance field flag survives binary round-trip");
 Check(reflBin.GetType("Circle")?.FindMethod("Describe")?.DeclaringType.Name == "Circle", "inheritance lookup works on binary-loaded module");
 
+// ── 6. Optional / default parameters on CLR methods ───────────────────────
+
+Console.WriteLine("== 6. Optional parameters ==");
+
+// Register a CLR type whose methods and constructors use optional parameters,
+// mimicking the V12.Core.Element(string? name = null, string? description = null,
+// IWorldElement? parent = null) pattern.
+rt.RegisterClrType("TestDefaults", typeof(TestDefaults));
+
+// Static method with optional params: call with fewer args than declared.
+Check(rt.CallMethod<string>("TestDefaults.Greet", "bob") == "hi bob",
+    "static method called with one optional arg omitted");
+// Call with BOTH optionals omitted.
+Check(rt.CallMethod<string>("TestDefaults.Greet") == "hi anon",
+    "static method called with both optional args omitted");
+// Call with all args supplied (backward compatibility).
+Check(rt.CallMethod<string>("TestDefaults.Greet", "eve", 42) == "hi eve age 42",
+    "static method called with all args supplied");
+
+// Constructor with optional params: omitted trailing args fill from defaults.
+var objFull  = rt.CallMethod<object>("TestDefaults..ctor", "x");
+var objShort = rt.CallMethod<object>("TestDefaults..ctor");
+Check(objFull  != null, "constructor called with one arg");
+Check(objShort != null, "constructor called with zero args");
+
 // ── Summary ────────────────────────────────────────────────────────────────
 
 Console.WriteLine();
@@ -235,3 +260,29 @@ if (failures.Count == 0)
 Console.WriteLine($"{failures.Count} FAILED / {passed + failures.Count} total:");
 foreach (var f in failures) Console.WriteLine($"  - {f}");
 return 1;
+
+// ── Helper CLR type with optional/default parameters ───────────────────────
+
+class TestDefaults
+{
+    // Static method exercising optional parameters — mirrors the
+    // Element(string? name = null, string? description = null) pattern.
+    public static string Greet(string? name = null, int? age = null)
+    {
+        if (name is null && age is null) return "hi anon";
+        if (name is null) return $"hi anon age {age}";
+        if (age is null) return $"hi {name}";
+        return $"hi {name} age {age}";
+    }
+
+    // Constructor with optional parameters — mirrors
+    // Element(string? name = null, string? description = null, IWorldElement? parent = null).
+    public string? Name { get; }
+    public int? Age { get; }
+
+    public TestDefaults(string? name = null, int? age = null)
+    {
+        Name = name;
+        Age = age;
+    }
+}
