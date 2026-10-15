@@ -77,28 +77,40 @@ public abstract class ExecutorBase : IExecutor
 
     // ── Value marshaling ───────────────────────────────────────────
 
-    public Value MarshalValue(object? val) => val switch
+    public Value MarshalValue(object? val)
     {
-        null => Value.Nil(),
-        string s => Value.FromStr(InternString(s)),
-        int i => Value.FromI4(i),
-        bool b => Value.FromI4(b ? 1 : 0),
-        long l => Value.FromI8(l),
-        float f => Value.FromR4(f),
-        double d => Value.FromR8(d),
-        // The VM's uint8/int8/int16/uint16 map onto the I4 tag, so a CLR array
-        // element of one of these boxed narrow-int types must come back as an
-        // I4 — otherwise it falls through to an opaque external object handle.
-        byte ub => Value.FromI4(ub),
-        sbyte sb => Value.FromI4(sb),
-        short s16 => Value.FromI4(s16),
-        ushort u16 => Value.FromI4(u16),
-        // A boxed uint is a VM heap handle (ValueToObject returns the raw
-        // handle for VM-internal objects), so it round-trips as an Obj value —
-        // this is how instance-method receivers flow back into the VM.
-        uint h => Value.FromObj(h),
-        _ => Value.FromObj(State.InternExternal(val)),
-    };
+        // A boxed enum (e.g. InputEvent.Key) matches none of the cases
+        // below, so it would fall through to an opaque external handle —
+        // making script comparisons like `evt.Key == InputKey.W` always
+        // fail. Convert it to its underlying value so engine enums
+        // marshal as plain ints (method-argument coercion converts back
+        // to the enum where a signature needs it).
+        if (val != null && val.GetType().IsEnum)
+            return MarshalValue(Convert.ChangeType(val, Enum.GetUnderlyingType(val.GetType())));
+
+        return val switch
+        {
+            null => Value.Nil(),
+            string s => Value.FromStr(InternString(s)),
+            int i => Value.FromI4(i),
+            bool b => Value.FromI4(b ? 1 : 0),
+            long l => Value.FromI8(l),
+            float f => Value.FromR4(f),
+            double d => Value.FromR8(d),
+            // The VM's uint8/int8/int16/uint16 map onto the I4 tag, so a CLR array
+            // element of one of these boxed narrow-int types must come back as an
+            // I4 — otherwise it falls through to an opaque external object handle.
+            byte ub => Value.FromI4(ub),
+            sbyte sb => Value.FromI4(sb),
+            short s16 => Value.FromI4(s16),
+            ushort u16 => Value.FromI4(u16),
+            // A boxed uint is a VM heap handle (ValueToObject returns the raw
+            // handle for VM-internal objects), so it round-trips as an Obj value —
+            // this is how instance-method receivers flow back into the VM.
+            uint h => Value.FromObj(h),
+            _ => Value.FromObj(State.InternExternal(val)),
+        };
+    }
 
     public object? ValueToObject(Value v) => v.Tag switch
     {

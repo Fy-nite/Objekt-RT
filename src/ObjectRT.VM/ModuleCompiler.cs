@@ -275,10 +275,21 @@ public class ModuleCompiler
         _funcMap.Clear();
         _typeMethodStart.Clear();
 
-        foreach (var type in src.Types)
+        // NOTE: typeIdx MUST be the positional index into src.Types (not
+        // _typeMap.Count). The resolution tables below address types and
+        // methods positionally (src.Types[i], step-3 guard, MethodOffset),
+        // while _typeMap.Count only equals the position when every type
+        // name is unique. Duplicate type names (e.g. the same facade
+        // loaded from several package trees) used to shift every later
+        // typeIdx down, so step-3 resolved methods against the WRONG type
+        // (usually one with no methods) and silently emitted empty
+        // fallback stubs — cross-contract calls then died at runtime with
+        // "Native method ... not found" and no diagnostic.
+        for (int posIdx = 0; posIdx < src.Types.Count; posIdx++)
         {
+            var type = src.Types[posIdx];
             string tname = src.Resolve(type.NameIndex);
-            int typeIdx = _typeMap.Count;
+            int typeIdx = posIdx;
             _typeMap[tname] = (uint)typeIdx;
 
             // A @Generic definition is a template: its method bodies reference
