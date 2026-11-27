@@ -47,6 +47,39 @@ public sealed class ExecutorState
     /// <summary>Looks up the allocating type index of a heap object.</summary>
     public bool TryGetObjectType(uint handle, out int typeIdx) => ObjectTypes.TryGetValue(handle, out typeIdx);
 
+    // ── Host roots ──────────────────────────────────────────────────────────
+    // The collector's roots are statics plus interpreter stacks/locals. Host
+    // code (a component wrapper, an editor binding) holds handles as plain CLR
+    // objects it passes back in, which that scan cannot see; without an explicit
+    // root such an object is swept while its owner is still using the handle.
+    private readonly HashSet<uint> _pinned = new();
+    private readonly object _pinnedLock = new();
+
+    /// <summary>Root a heap object for host code outside the interpreter.</summary>
+    public void PinHandle(uint handle)
+    {
+        if (IsExternal(handle)) return;
+        lock (_pinnedLock) _pinned.Add(handle);
+    }
+
+    /// <summary>Drop a host root. Returns true when it was pinned.</summary>
+    public bool UnpinHandle(uint handle)
+    {
+        lock (_pinnedLock) return _pinned.Remove(handle);
+    }
+
+    /// <summary>Number of host-rooted heap objects. Diagnostics and leak tests.</summary>
+    public int PinnedCount
+    {
+        get { lock (_pinnedLock) return _pinned.Count; }
+    }
+
+    /// <summary>Copy of the pinned handles, for the collector's mark phase.</summary>
+    internal uint[] PinnedSnapshot()
+    {
+        lock (_pinnedLock) return _pinned.Count == 0 ? new uint[0] : new List<uint>(_pinned).ToArray();
+    }
+
     /// <summary>Static field storage.</summary>
     public readonly Value[] StaticFields;
 

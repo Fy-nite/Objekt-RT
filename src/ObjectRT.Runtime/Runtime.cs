@@ -876,6 +876,33 @@ public sealed class Runtime : IHostedRuntime
     }
 
     /// <summary>
+    /// Root a heap object allocated by <see cref="AllocateObject"/> so the
+    /// collector treats it as live. Host code holds handles as CLR objects, which
+    /// the interpreter's stack and local scan cannot see.
+    /// </summary>
+    public void PinObject(object? handle)
+    {
+        if (handle is uint h && _executor is ExecutorBase eb) eb.State.PinHandle(h);
+    }
+
+    /// <summary>Drop a host root added by <see cref="PinObject"/>.</summary>
+    public void UnpinObject(object? handle)
+    {
+        if (handle is uint h && _executor is ExecutorBase eb) eb.State.UnpinHandle(h);
+    }
+
+    /// <summary>Number of host-rooted heap objects. Diagnostics and leak tests.</summary>
+    public int PinnedObjectCount => _executor is ExecutorBase eb ? eb.State.PinnedCount : 0;
+
+    /// <summary>
+    /// Whether a handle returned by <see cref="AllocateObject"/> still refers to a
+    /// live heap slot. Diagnostics and leak tests; a freed handle can be reused.
+    /// </summary>
+    public bool IsObjectAlive(object? handle)
+        => handle is uint h && _executor is ExecutorBase eb
+           && eb.State.TryGetHeapBuffer(h, out var buf) && buf != null;
+
+    /// <summary>
     /// Whether a field (by qualified name "Type.field") is static. Instance
     /// fields need an object handle; static ones live in the static table.
     /// </summary>

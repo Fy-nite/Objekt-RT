@@ -248,6 +248,31 @@ var objShort = rt.CallMethod<object>("TestDefaults..ctor");
 Check(objFull  != null, "constructor called with one arg");
 Check(objShort != null, "constructor called with zero args");
 
+// ── Host roots: a pinned handle survives a collection ─────────────────────
+
+Console.WriteLine("Host roots");
+var pinMod = OilFileReader.ParseString(ShapeOil);
+var pinRt = new Runtime();
+pinRt.LoadModule(pinMod);
+var pinnedObj = pinRt.AllocateObject("Shape");
+Check(pinnedObj != null, "object allocated for pinning");
+if (pinnedObj != null)
+{
+    Check(pinRt.IsObjectAlive(pinnedObj), "allocated object is live");
+
+    pinRt.PinObject(pinnedObj);
+    Check(pinRt.PinnedObjectCount == 1, "pin records a host root");
+
+    pinRt.CollectGC();
+    Check(pinRt.IsObjectAlive(pinnedObj), "pinned object survives a collection");
+
+    pinRt.UnpinObject(pinnedObj);
+    Check(pinRt.PinnedObjectCount == 0, "unpin drops the host root");
+
+    pinRt.CollectGC();
+    Check(!pinRt.IsObjectAlive(pinnedObj), "unpinned object is reclaimed");
+}
+
 // ── Summary ────────────────────────────────────────────────────────────────
 
 Console.WriteLine();

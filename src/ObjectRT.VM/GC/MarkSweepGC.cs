@@ -175,6 +175,18 @@ internal sealed class MarkSweepGC
             bool debug = Environment.GetEnvironmentVariable("ORTRT_GC_DEBUG") == "1";
             if (debug) Console.Error.WriteLine($"; GC roots: statics={state.StaticFields.Length} liveIps={state.Coordinator.LiveCount}");
             foreach (var v in state.StaticFields) { if(debug) Console.Error.WriteLine($";  static {v}"); MarkValue(v); }
+
+            // Host roots: handles the CLR side holds (component wrappers, editor
+            // bindings). The stack/local scan cannot see these, so without this
+            // a live component's object would be swept mid-life.
+            foreach (var pinned in state.PinnedSnapshot())
+            {
+                if (pinned < (uint)marked.Length && heap.GetBufferUnsafe(pinned) != null && !marked[pinned])
+                {
+                    marked[pinned] = true;
+                    work.Push(pinned);
+                }
+            }
             foreach (var interp in state.Coordinator.LiveSnapshot())
             {
                 if(debug) Console.Error.WriteLine($";  ip IsExec={interp.IsExecuting} IsParked={interp.IsParked} IsInNative={interp.IsInNative} stack={interp.StackForGC.Count} frames={interp.FramesForGC.Count}");
